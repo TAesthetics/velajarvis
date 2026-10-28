@@ -37,6 +37,20 @@ Der Schwarm ist **Velas Marketing-Kopf** (<https://github.com/TAesthetics/vela>)
   - `saveIdea` – speichert Ideen im VAULT (localStorage dieses Browsers), Export als Markdown oder JSON.
 - Wake Word: „Throng …", „Schwarm …" oder „Jarvis …".
 
+## Immer zuhören (wie in den TikTok-Demos)
+
+Nach dem Start-Tipp („Schwarm wecken" / „Systeme initialisieren") ist das Mikro **dauerhaft offen**, kein Button nötig:
+
+- **Wake-Word** (Standard, Chip `WAKE`): „Throng …", „Schwarm …" oder „Jarvis …" (auch „Hey/Okay …"). Die Erkennung ist unscharf, weil Chrome auf Deutsch die Wörter oft verstümmelt (z. B. „Service", „Travis", „strong", „Thron" zählen auch).
+  - „Throng, schreib einen Post über den Schleier" → wird sofort ausgeführt.
+  - Nur „Throng" → kurzer Ton, dann 8 Sekunden Zeit für den Befehl.
+- **Frei-Modus** (Chip auf `FREI` tippen): jede Äußerung geht direkt an die KI.
+- `MIC` schaltet das Mikro stumm/an. Der große Mikro-Button heißt „sofort sprechen" (ohne Wake-Word).
+- Während die KI spricht, ist das Mikro pausiert (sie hört sich nicht selbst) und läuft danach automatisch weiter.
+- **Debug**: Titel lange drücken (oder Doppelklick) zeigt, was Chrome hört (Rohtranskripte, Neustarts, Fehler).
+- Android-Chrome beendet die Erkennung nach jeder Pause; die App startet sie automatisch neu (mit Backoff bei Netzwerkfehlern). Dabei kann Android einen kurzen Systemton abspielen.
+- Tests für Wake-Word-Erkennung und Neustart-Logik: `npm test`.
+
 ## Tech-Stack
 
 - Next.js 16 (App Router, TypeScript, Tailwind CSS 4)

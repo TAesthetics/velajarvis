@@ -3,12 +3,11 @@
 import { useChat } from "@ai-sdk/react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Orb, { type OrbState } from "./Orb";
-import { getSpeechRecognition, pickVoice, type SpeechRec, type SRResultEvent } from "@/lib/speech";
+import { getSpeechRecognition, pickVoice } from "@/lib/speech";
+import { VoiceListener, type ListenMode, type ListenerDebugEvent } from "@/lib/listener";
 
 type Lang = "de-DE" | "en-US";
-type ListenMode = "off" | "ptt" | "wake" | "wake-armed";
 
-const WAKE_RE = /\b(jarvis|jarvys|javis|dschawis|tschawis|dscharvis|travis|throng|throngs|schwarm)\b[\s,.!?:]*/i;
 
 type Mode = "throng" | "jarvis";
 
@@ -22,7 +21,7 @@ const THRONG_TEXT = {
     wake: 'Sag „Throng …" oder „Jarvis …"',
     placeholder: "Sag uns, was Vela braucht …",
     boot: "Schwarm wecken",
-    hold: "Leertaste halten oder Mikro tippen",
+    hold: "Mikro tippen = sofort sprechen",
   },
   "en-US": {
     idle: "We are waiting",
@@ -33,7 +32,7 @@ const THRONG_TEXT = {
     wake: 'Say "Throng …" or "Jarvis …"',
     placeholder: "Tell us what Vela needs …",
     boot: "Wake the swarm",
-    hold: "Hold space or tap the mic",
+    hold: "Tap the mic to talk now",
   },
 } as const;
 
@@ -47,7 +46,7 @@ const UI_TEXT = {
     wake: 'Sag „Jarvis …"',
     placeholder: "Befehl eingeben, Sir …",
     boot: "Systeme initialisieren",
-    hold: "Leertaste halten oder Mikro tippen",
+    hold: "Mikro tippen = sofort sprechen",
   },
   "en-US": {
     idle: "Standing by",
@@ -58,7 +57,7 @@ const UI_TEXT = {
     wake: 'Say "Jarvis …"',
     placeholder: "Type a command, Sir …",
     boot: "Initialise systems",
-    hold: "Hold space or tap the mic",
+    hold: "Tap the mic to talk now",
   },
 } as const;
 
@@ -94,9 +93,13 @@ export default function Jarvis() {
   const [mode, setMode] = useState<Mode>("throng");
   const [vault, setVault] = useState<Vault>({ ideas: [], drafts: [] });
   const [vaultOpen, setVaultOpen] = useState(false);
-  const [wakeEnabled, setWakeEnabled] = useState(false);
+  const [micOn, setMicOn] = useState(true);
+  const [listenMode, setListenMode] = useState<ListenMode>("wake");
+  const [armed, setArmed] = useState(false);
+  const [micRunning, setMicRunning] = useState(false);
+  const [debugOpen, setDebugOpen] = useState(false);
+  const [debugLog, setDebugLog] = useState<ListenerDebugEvent[]>([]);
   const [muted, setMuted] = useState(false);
-  const [listening, setListening] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [partial, setPartial] = useState("");
   const [input, setInput] = useState("");
@@ -104,17 +107,21 @@ export default function Jarvis() {
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [voiceURI, setVoiceURI] = useState<string>("");
   const srSupported = useSyncExternalStore(noopSubscribe, () => !!getSpeechRecognition(), () => true);
+  const isAndroidUA = useSyncExternalStore(noopSubscribe, () => /android/i.test(navigator.userAgent), () => false);
   const ttsSupported = useSyncExternalStore(noopSubscribe, () => "speechSynthesis" in window, () => true);
   const [clock, setClock] = useState("");
   const [greetingText, setGreetingText] = useState<string | null>(null);
 
   const levelRef = useRef(0);
-  const recRef = useRef<SpeechRec | null>(null);
-  const modeRef = useRef<ListenMode>("off");
+  const listenerRef = useRef<VoiceListener | null>(null);
+  const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const armedRef = useRef(false);
+  const listenModeRef = useRef<ListenMode>("wake");
+  const lastHeardRef = useRef(0);
+  const androidRef = useRef(false);
   const langRef = useRef(lang);
   const personaRef = useRef<Mode>(mode);
   const vaultSeen = useRef<Set<string>>(new Set());
-  const wakeRef = useRef(wakeEnabled);
   const mutedRef = useRef(muted);
   const speakingRef = useRef(false);
   const busyRef = useRef(false);
@@ -122,11 +129,13 @@ export default function Jarvis() {
   const utteranceKeep = useRef<SpeechSynthesisUtterance[]>([]);
   const spokenIdx = useRef<Record<string, number>>({});
   const openedTools = useRef<Set<string>>(new Set());
-  const audioRef = useRef<{ ctx: AudioContext; analyser: AnalyserNode; data: Uint8Array<ArrayBuffer> } | null>(null);
-  const armTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const audioRef = useRef<{
+    ctx: AudioContext;
+    analyser: AnalyserNode | null;
+    data: Uint8Array<ArrayBuffer> | null;
+  } | null>(null);
   const voicesRef = useRef<SpeechSynthesisVoice[]>([]);
   const voiceURIRef = useRef("");
-  const startRecRef = useRef<(mode: Exclude<ListenMode, "off">) => void>(() => {});
 
   useEffect(() => {
     langRef.current = lang;
@@ -153,8 +162,17 @@ export default function Jarvis() {
     });
   }, []);
   useEffect(() => {
-    wakeRef.current = wakeEnabled;
-  }, [wakeEnabled]);
+    listenModeRef.current = listenMode;
+    listenerRef.current?.setMode(listenMode);
+  }, [listenMode]);
+  useEffect(() => {
+    listenerRef.current?.setLang(lang);
+  }, [lang]);
+  useEffect(() => {
+    if (!booted) return;
+    listenerRef.current?.setEnabled(micOn);
+  }, [micOn, booted]);
+  useEffect(() => () => listenerRef.current?.destroy(), []);
   useEffect(() => {
     mutedRef.current = muted;
   }, [muted]);
@@ -251,15 +269,22 @@ export default function Jarvis() {
           0.25 * Math.abs(Math.sin(t * 9.3)) * Math.abs(Math.sin(t * 2.1 + 1)) +
           0.25 * Math.random() * Math.abs(Math.sin(t * 17));
         levelRef.current = speechPulse;
-      } else if (a && (modeRef.current === "ptt" || modeRef.current === "wake-armed")) {
-        a.analyser.getByteTimeDomainData(a.data);
+      } else if (a?.analyser && (armedRef.current || listenModeRef.current === "free")) {
+        a.analyser.getByteTimeDomainData(a.data!);
         let sum = 0;
-        for (let i = 0; i < a.data.length; i++) {
-          const v = (a.data[i] - 128) / 128;
+        const d = a.data!;
+        for (let i = 0; i < d.length; i++) {
+          const v = (d[i] - 128) / 128;
           sum += v * v;
         }
-        const rms = Math.sqrt(sum / a.data.length);
+        const rms = Math.sqrt(sum / d.length);
         levelRef.current = Math.min(1, rms * 5);
+      } else if (now - lastHeardRef.current < 900) {
+        // No analyser (Android: mic is owned by speech recognition) → pulse on recognised speech
+        const k = 1 - (now - lastHeardRef.current) / 900;
+        levelRef.current = (0.25 + 0.35 * Math.random()) * k + (armedRef.current ? 0.15 : 0);
+      } else if (armedRef.current) {
+        levelRef.current = 0.15 + 0.05 * Math.sin(now / 120);
       } else {
         levelRef.current = 0;
       }
@@ -269,22 +294,44 @@ export default function Jarvis() {
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  const ensureMic = useCallback(async () => {
-    if (audioRef.current) {
-      if (audioRef.current.ctx.state === "suspended") await audioRef.current.ctx.resume();
-      return;
+  /**
+   * Must run inside the start tap: unlocks audio output and triggers the mic permission prompt.
+   * On Android the mic stream is released again right away, because Chrome cannot share the
+   * microphone between getUserMedia and SpeechRecognition there.
+   */
+  const ensureAudio = useCallback(async () => {
+    const isAndroid = /android/i.test(navigator.userAgent);
+    androidRef.current = isAndroid;
+    if (!audioRef.current) {
+      const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      audioRef.current = { ctx: new Ctx(), analyser: null, data: null };
     }
+    const a = audioRef.current;
+    if (a.ctx.state === "suspended") await a.ctx.resume().catch(() => {});
+    if (a.analyser) return true;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const ctx = new AudioContext();
-      const src = ctx.createMediaStreamSource(stream);
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 1024;
-      analyser.smoothingTimeConstant = 0.6;
-      src.connect(analyser);
-      audioRef.current = { ctx, analyser, data: new Uint8Array(new ArrayBuffer(analyser.fftSize)) };
-    } catch {
-      // Visualisation is optional; recognition may still work.
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true },
+      });
+      if (isAndroid) {
+        stream.getTracks().forEach((t) => t.stop());
+      } else {
+        const src = a.ctx.createMediaStreamSource(stream);
+        const analyser = a.ctx.createAnalyser();
+        analyser.fftSize = 1024;
+        analyser.smoothingTimeConstant = 0.6;
+        src.connect(analyser);
+        a.analyser = analyser;
+        a.data = new Uint8Array(new ArrayBuffer(analyser.fftSize));
+      }
+      return true;
+    } catch (err) {
+      const name = err instanceof Error ? err.name : "";
+      if (name === "NotAllowedError" || name === "SecurityError") {
+        setHudError("Mikrofon blockiert. Bitte in Chrome erlauben (Schloss-Symbol → Berechtigungen → Mikrofon).");
+        return false;
+      }
+      return true; // visualisation optional, recognition may still work
     }
   }, []);
 
@@ -335,12 +382,8 @@ export default function Jarvis() {
     };
     u.onend = done;
     u.onerror = done;
-    // Pause recognition while talking so Jarvis doesn't hear himself
-    if (recRef.current && modeRef.current.startsWith("wake")) {
-      try {
-        recRef.current.abort();
-      } catch {}
-    }
+    // Never listen while talking, so the assistant doesn't hear itself
+    listenerRef.current?.pause();
     window.speechSynthesis.speak(u);
   }, []);
 
@@ -350,6 +393,7 @@ export default function Jarvis() {
     utteranceKeep.current = [];
     speakingRef.current = false;
     setSpeaking(false);
+    listenerRef.current?.resume(150);
   }, []);
 
   // ---------- Sending ----------
@@ -367,168 +411,89 @@ export default function Jarvis() {
     [sendMessage, shutUp, stop, clearError],
   );
 
-  // ---------- Speech recognition ----------
-  const startRecognition = useCallback(
-    (mode: Exclude<ListenMode, "off">) => {
-      const SR = getSpeechRecognition();
-      if (!SR) return;
-      if (recRef.current) {
-        const old = recRef.current;
-        old.onend = null;
-        old.onresult = null;
-        old.onerror = null;
-        try {
-          old.abort();
-        } catch {}
-      }
-      const rec = new SR();
-      rec.lang = langRef.current;
-      rec.continuous = mode !== "ptt";
-      rec.interimResults = true;
-      rec.maxAlternatives = 1;
-      modeRef.current = mode;
-      recRef.current = rec;
-      setListening(mode === "ptt" || mode === "wake-armed");
-
-      const arm = () => {
-        modeRef.current = "wake-armed";
-        setListening(true);
-        beep(1046);
-        if (armTimer.current) clearTimeout(armTimer.current);
-        armTimer.current = setTimeout(() => {
-          if (modeRef.current === "wake-armed") {
-            modeRef.current = "wake";
-            setListening(false);
-            setPartial("");
-          }
-        }, 8000);
-      };
-
-      rec.onresult = (e: SRResultEvent) => {
-        let interim = "";
-        for (let i = e.resultIndex; i < e.results.length; i++) {
-          const r = e.results[i];
-          const text = r[0].transcript;
-          if (!r.isFinal) {
-            interim += text;
-            continue;
-          }
-          const m = modeRef.current;
-          if (m === "ptt" || m === "wake-armed") {
-            if (armTimer.current) clearTimeout(armTimer.current);
-            if (m === "wake-armed") modeRef.current = "wake";
-            setListening(false);
-            submit(text);
-          } else if (m === "wake") {
-            const match = text.match(WAKE_RE);
-            if (match && match.index !== undefined) {
-              const command = text.slice(match.index + match[0].length).trim();
-              if (command.length > 2) {
-                beep(1046);
-                submit(command);
-              } else arm();
-            }
-          }
-        }
-        const m = modeRef.current;
-        if (m === "wake" && WAKE_RE.test(interim)) {
-          // Show what we hear once the wake word appears
-          setPartial(interim);
-        } else if (m !== "wake") setPartial(interim);
-      };
-      rec.onerror = (e) => {
-        if (e.error === "not-allowed" || e.error === "service-not-allowed") {
-          setHudError("Mikrofonzugriff verweigert. Bitte im Browser erlauben.");
-          setWakeEnabled(false);
-          modeRef.current = "off";
-          setListening(false);
-        }
-      };
-      rec.onend = () => {
-        if (recRef.current !== rec) return;
-        const m = modeRef.current;
-        if (m === "ptt") {
-          setListening(false);
-          setPartial("");
-          modeRef.current = wakeRef.current ? "wake" : "off";
-        }
-        if ((modeRef.current === "wake" || modeRef.current === "wake-armed") && wakeRef.current) {
-          setTimeout(() => {
-            if (recRef.current === rec && !speakingRef.current && wakeRef.current) {
-              startRecRef.current(modeRef.current === "wake-armed" ? "wake-armed" : "wake");
-            }
-          }, 250);
-        } else {
-          recRef.current = null;
-        }
-      };
-      try {
-        rec.start();
-      } catch {}
-    },
-    [beep, submit],
-  );
-
+  // TTS watchdog: some Android voices never fire onend → don't leave the mic paused forever
   useEffect(() => {
-    startRecRef.current = startRecognition;
-  }, [startRecognition]);
-
-  const stopRecognition = useCallback(() => {
-    const rec = recRef.current;
-    if (rec) {
-      try {
-        rec.stop();
-      } catch {}
-    }
+    let idleTicks = 0;
+    const id = setInterval(() => {
+      if (!speakingRef.current || !("speechSynthesis" in window)) {
+        idleTicks = 0;
+        return;
+      }
+      const ss = window.speechSynthesis;
+      idleTicks = ss.speaking || ss.pending ? 0 : idleTicks + 1;
+      if (idleTicks >= 3) {
+        idleTicks = 0;
+        pendingUtterances.current = 0;
+        utteranceKeep.current = [];
+        speakingRef.current = false;
+        setSpeaking(false);
+        listenerRef.current?.resume();
+      }
+    }, 700);
+    return () => clearInterval(id);
   }, []);
 
-  // When Jarvis finishes talking, resume wake-word listening
-  useEffect(() => {
-    onSpeechIdle.current = () => {
-      if (wakeRef.current && !busyRef.current) startRecognition("wake");
-    };
-  }, [startRecognition]);
+  // ---------- Always-on speech recognition (VoiceListener) ----------
+  const pushDebug = useCallback((e: ListenerDebugEvent) => {
+    setDebugLog((l) => [e, ...l].slice(0, 60));
+  }, []);
 
-  // Toggle wake word
-  useEffect(() => {
-    if (!booted) return;
-    if (wakeEnabled) {
-      ensureMic().then(() => {
-        if (!speakingRef.current && modeRef.current === "off") startRecognition("wake");
-      });
-    } else if (modeRef.current === "wake" || modeRef.current === "wake-armed") {
-      modeRef.current = "off";
-      setListening(false);
-      setPartial("");
-      const rec = recRef.current;
-      recRef.current = null;
-      try {
-        rec?.abort();
-      } catch {}
-    }
-  }, [wakeEnabled, booted, ensureMic, startRecognition]);
+  const startListener = useCallback(() => {
+    const SR = getSpeechRecognition();
+    if (!SR) return;
+    listenerRef.current?.destroy();
+    const l = new VoiceListener(
+      SR,
+      {
+        onDebug: pushDebug,
+        onWake: () => {
+          beep(1046);
+          lastHeardRef.current = performance.now();
+          setPartial("");
+          if (busyRef.current) stop(); // barge-in while thinking
+        },
+        onCommand: (text) => {
+          setPartial("");
+          beep(1318);
+          submit(text);
+        },
+        onInterim: (text, isCommand) => {
+          lastHeardRef.current = performance.now();
+          if (isCommand || listenModeRef.current === "free") setPartial(text);
+        },
+        onState: ({ running, armed }) => {
+          armedRef.current = armed;
+          setArmed(armed);
+          setMicRunning(running);
+          if (!armed && listenModeRef.current === "wake") setPartial("");
+        },
+        onFatal: (msg) => {
+          setHudError(msg);
+          setMicOn(false);
+        },
+      },
+      { lang: langRef.current, mode: listenModeRef.current, armMs: 8000 },
+    );
+    listenerRef.current = l;
+    if (speakingRef.current) l.pause();
+    l.setEnabled(true);
+  }, [beep, pushDebug, stop, submit]);
 
-  // Restart recognition with new language
+  // When the assistant finishes talking, resume listening
   useEffect(() => {
-    if (recRef.current && modeRef.current !== "off" && modeRef.current !== "ptt") {
-      startRecognition(modeRef.current);
-    }
-  }, [lang, startRecognition]);
+    onSpeechIdle.current = () => listenerRef.current?.resume();
+  }, []);
 
-  const pttDown = useCallback(async () => {
-    if (!srSupported) return;
+  /** Mic button / space bar: "talk now" without the wake word. */
+  const talkNow = useCallback(() => {
+    if (!srSupported || !booted) return;
     shutUp();
-    await ensureMic();
+    if (!micOn) setMicOn(true);
     beep(880);
-    startRecognition("ptt");
-  }, [srSupported, shutUp, ensureMic, beep, startRecognition]);
+    listenerRef.current?.arm(8000);
+  }, [srSupported, booted, shutUp, micOn, beep]);
 
-  const pttToggle = useCallback(() => {
-    if (modeRef.current === "ptt") stopRecognition();
-    else void pttDown();
-  }, [pttDown, stopRecognition]);
-
-  // Space bar = push-to-talk (hold)
+  // Space bar = talk now
   useEffect(() => {
     if (!booted) return;
     const down = (e: KeyboardEvent) => {
@@ -536,22 +501,11 @@ export default function Jarvis() {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       e.preventDefault();
-      void pttDown();
-    };
-    const up = (e: KeyboardEvent) => {
-      if (e.code !== "Space") return;
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-      e.preventDefault();
-      if (modeRef.current === "ptt") stopRecognition();
+      talkNow();
     };
     window.addEventListener("keydown", down);
-    window.addEventListener("keyup", up);
-    return () => {
-      window.removeEventListener("keydown", down);
-      window.removeEventListener("keyup", up);
-    };
-  }, [booted, pttDown, stopRecognition]);
+    return () => window.removeEventListener("keydown", down);
+  }, [booted, talkNow]);
 
   // ---------- Stream → speech (sentence by sentence) ----------
   useEffect(() => {
@@ -572,13 +526,6 @@ export default function Jarvis() {
     }
   }, [messages, status, speak]);
 
-  // If the turn ends with nothing to say, resume wake listening
-  useEffect(() => {
-    if ((status === "ready" || status === "error") && !speakingRef.current && wakeRef.current && modeRef.current !== "ptt") {
-      if (!recRef.current) startRecognition("wake");
-    }
-  }, [status, startRecognition]);
-
   // ---------- Client-side effect of the openWebsite tool ----------
   useEffect(() => {
     for (const m of messages) {
@@ -596,23 +543,42 @@ export default function Jarvis() {
 
   // ---------- Boot ----------
   const boot = useCallback(async () => {
+    // Unlock speech synthesis synchronously inside the tap (mobile browsers require a gesture)
+    if ("speechSynthesis" in window) {
+      const unlock = new SpeechSynthesisUtterance(" ");
+      unlock.volume = 0;
+      window.speechSynthesis.speak(unlock);
+    }
     setBooted(true);
-    await ensureMic();
+    const ok = await ensureAudio();
     beep(660);
     setTimeout(() => beep(990), 140);
     const g = greeting(langRef.current, personaRef.current);
     setGreetingText(g);
+    if (ok) startListener();
     setTimeout(() => speak(g), 350);
-  }, [ensureMic, beep, speak]);
+  }, [ensureAudio, beep, speak, startListener]);
 
   // ---------- Derived UI ----------
+  const listening = armed;
   const orbState: OrbState =
     hudError || error ? "error" : speaking ? "speaking" : listening ? "listening" : busy ? "thinking" : "idle";
+  const micLabel = !micOn
+    ? lang === "en-US" ? "MIC OFF" : "MIKRO AUS"
+    : speaking
+      ? lang === "en-US" ? "MIC PAUSED WHILE SPEAKING" : "MIKRO PAUSIERT (SPRICHT)"
+      : armed
+        ? lang === "en-US" ? "MIC OPEN · SPEAK NOW" : "MIKRO OFFEN · SPRICH JETZT"
+        : micRunning
+        ? listenMode === "free"
+          ? lang === "en-US" ? "MIC OPEN · EVERYTHING COUNTS" : "MIKRO OFFEN · ALLES ZÄHLT"
+          : lang === "en-US" ? "MIC OPEN · WAITING FOR WAKE WORD" : "MIKRO OFFEN · WARTE AUF WAKE-WORD"
+        : lang === "en-US" ? "MIC STARTING …" : "MIKRO STARTET …";
   const t = mode === "throng" ? THRONG_TEXT[lang] : UI_TEXT[lang];
   const aiLabel = mode === "throng" ? "WIR" : "JARVIS";
   const userLabel = mode === "throng" ? "TERENCE" : "SIR";
   const statusLabel =
-    orbState === "idle" && wakeEnabled ? t.wake : t[orbState === "error" ? "error" : orbState];
+    orbState === "idle" && micOn && listenMode === "wake" ? t.wake : t[orbState === "error" ? "error" : orbState];
 
   const transcript = useMemo(
     () =>
@@ -646,7 +612,16 @@ export default function Jarvis() {
       {/* HUD top bar */}
       <header className="hud relative z-10 flex items-start justify-between px-5 pt-4 sm:px-8 sm:pt-6">
         <div>
-          <h1 className="font-display text-xl tracking-[0.45em] text-cyan-300 drop-shadow-[0_0_10px_rgba(0,200,255,0.8)] sm:text-2xl">
+          <h1
+            onPointerDown={() => {
+              pressTimer.current = setTimeout(() => setDebugOpen((d) => !d), 650);
+            }}
+            onPointerUp={() => pressTimer.current && clearTimeout(pressTimer.current)}
+            onPointerLeave={() => pressTimer.current && clearTimeout(pressTimer.current)}
+            onDoubleClick={() => setDebugOpen((d) => !d)}
+            title="Lang drücken: Debug"
+            className="cursor-pointer font-display text-xl tracking-[0.45em] text-cyan-300 drop-shadow-[0_0_10px_rgba(0,200,255,0.8)] sm:text-2xl"
+          >
             {mode === "throng" ? "T.H.R.O.N.G." : "J.A.R.V.I.S."}
           </h1>
           <p className="mt-1 text-[10px] uppercase tracking-[0.3em] text-cyan-500/70">
@@ -671,6 +646,24 @@ export default function Jarvis() {
             >
               {statusLabel}
             </span>
+            {booted && srSupported && (
+              <div className="mt-2 flex justify-center">
+                <span
+                  className={`flex items-center gap-2 rounded-full border px-3 py-1 font-mono text-[10px] tracking-widest ${
+                    micOn && micRunning && !speaking
+                      ? "border-cyan-300/50 bg-cyan-400/10 text-cyan-100"
+                      : "border-cyan-400/20 text-cyan-400/60"
+                  }`}
+                >
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      micOn && micRunning && !speaking ? "animate-pulse bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.9)]" : micOn ? "bg-amber-400" : "bg-rose-500"
+                    }`}
+                  />
+                  {micLabel}
+                </span>
+              </div>
+            )}
           </div>
         </div>
       </section>
@@ -742,19 +735,27 @@ export default function Jarvis() {
             {lang === "de-DE" ? "DE" : "EN"}
           </ToggleChip>
           <ToggleChip
-            active={wakeEnabled}
+            active={micOn}
             disabled={!srSupported}
-            onClick={() => setWakeEnabled((w) => !w)}
-            title='Wake Word "Jarvis"'
+            onClick={() => setMicOn((m) => !m)}
+            title="Mikrofon an/aus"
           >
-            WAKE
+            {micOn ? "MIC" : "MIC AUS"}
+          </ToggleChip>
+          <ToggleChip
+            active={listenMode === "wake"}
+            disabled={!srSupported}
+            onClick={() => setListenMode((m) => (m === "wake" ? "free" : "wake"))}
+            title="Wake-Word oder immer zuhören"
+          >
+            {listenMode === "wake" ? "WAKE" : "FREI"}
           </ToggleChip>
 
           <button
             type="button"
-            onClick={pttToggle}
+            onClick={talkNow}
             disabled={!srSupported || !booted}
-            aria-label="Push to talk"
+            aria-label="Jetzt sprechen"
             className={`group relative grid h-16 w-16 place-items-center rounded-full border transition-all ${
               listening
                 ? "border-cyan-200 bg-cyan-400/25 shadow-[0_0_40px_rgba(0,230,255,0.8)]"
@@ -810,9 +811,33 @@ export default function Jarvis() {
           </button>
         </form>
         <p className="font-mono text-[10px] tracking-widest text-cyan-500/60">
-          {srSupported ? t.hold : "Spracherkennung nicht unterstützt – Texteingabe aktiv (Chrome/Edge empfohlen)"}
+          {srSupported ? (listenMode === "wake" ? t.wake + " · " + t.hold : t.hold) : "Spracherkennung nicht unterstützt – Texteingabe aktiv (Chrome/Edge empfohlen)"}
         </p>
       </footer>
+
+      {debugOpen && (
+        <div className="absolute left-3 top-20 z-50 max-h-[55vh] w-[min(94vw,420px)] overflow-hidden rounded-xl border border-emerald-400/40 bg-black/90 font-mono text-[11px] text-emerald-200 shadow-xl select-text">
+          <div className="flex items-center justify-between border-b border-emerald-400/30 px-3 py-2">
+            <span>
+              DEBUG · {micRunning ? "läuft" : "aus"} · {listenMode} · {armed ? "armed" : "idle"} · {lang}
+              {isAndroidUA ? " · android" : ""}
+            </span>
+            <span className="flex gap-3">
+              <button type="button" onClick={() => setDebugLog([])}>leeren</button>
+              <button type="button" onClick={() => setDebugOpen(false)}>✕</button>
+            </span>
+          </div>
+          <div className="max-h-[48vh] overflow-y-auto px-3 py-2">
+            {!srSupported && <p className="text-rose-300">SpeechRecognition wird von diesem Browser nicht unterstützt.</p>}
+            {debugLog.length === 0 && <p className="text-emerald-400/60">Noch keine Ereignisse.</p>}
+            {debugLog.map((e, i) => (
+              <p key={i} className={e.type === "error" ? "text-rose-300" : e.type === "wake" || e.type === "command" ? "text-amber-200" : e.type === "interim" ? "text-emerald-400/60" : ""}>
+                {new Date(e.t).toLocaleTimeString("de-AT", { timeZone: "Europe/Vienna" })} {e.type.padEnd(7, " ")} {e.text ?? ""}
+              </p>
+            ))}
+          </div>
+        </div>
+      )}
 
       {vaultOpen && (
         <VaultPanel
