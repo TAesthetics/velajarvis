@@ -18,6 +18,7 @@ for (const [name, p] of [
     assert.match(p, /postest niemals selbst/);
     assert.match(p, /keine erfundenen Zahlen/);
     assert.match(p, /kurz und ehrlich: du bist ein KI-Sprachmodell/);
+    assert.match(p, /Normale In-Character-Fragen/);
     assert.match(p, /Kein Manipulieren/);
     assert.match(p, /keine Abhängigkeit/);
     assert.match(p, /NUR im Gespräch mit Terence/);
