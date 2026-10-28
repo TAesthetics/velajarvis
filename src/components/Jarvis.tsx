@@ -13,6 +13,7 @@ import { VoiceListener, type ListenMode, type ListenerDebugEvent } from "@/lib/l
 import { cleanForSpeech, readingMs, splitSubtitles } from "@/lib/subtitles";
 import { EMPTY_VAULT, loadVault, saveVault, type Draft, type Idea, type PurpleDoc, type Vault } from "@/lib/vault";
 import SiemPanel from "./hud/SiemPanel";
+import { MORNING_ENABLED_KEY, MORNING_KEY, shouldGreet, viennaDate } from "@/lib/morning";
 import { counters as siemCounters, demoLogs, detect, parseLogs, summarizeForPrompt, timeline as siemTimeline, type SiemEvent } from "@/lib/siem";
 import {
   POP_CAP,
@@ -142,10 +143,13 @@ function messageText(m: { parts: Array<{ type: string; text?: string }> }) {
 
 export default function Jarvis() {
   const [booted, setBooted] = useState(false);
+  const bootedRef = useRef(false);
   const [lang, setLang] = useState<Lang>("de-DE");
   const [mode, setMode] = useState<Mode>("throng");
   const [vault, setVault] = useState<Vault>(EMPTY_VAULT);
   const [siemOpen, setSiemOpen] = useState(false);
+  const [morningEnabled, setMorningEnabled] = useState(true);
+  const [morningPreview, setMorningPreview] = useState<string | null>(null);
   const [siemEvents, setSiemEvents] = useState<SiemEvent[]>([]);
   const [vaultOpen, setVaultOpen] = useState(false);
   const [micOn, setMicOn] = useState(true);
@@ -196,6 +200,9 @@ export default function Jarvis() {
   const voicesRef = useRef<SpeechSynthesisVoice[]>([]);
   const voiceURIRef = useRef("");
   const popRef = useRef(pop);
+  const blockedSpeechRef = useRef<string[]>([]);
+  const morningRef = useRef<{ promise: Promise<string | null>; text: string | null } | null>(null);
+  const morningEnabledRef = useRef(true);
   const subSeq = useRef(0);
   const currentSubId = useRef<number | null>(null);
   const subTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
@@ -323,7 +330,7 @@ export default function Jarvis() {
     voiceURIRef.current = voiceURI;
   }, [voiceURI]);
 
-  const { messages, sendMessage, status, error, stop, clearError } = useChat({
+  const { messages, sendMessage, setMessages, status, error, stop, clearError } = useChat({
     onFinish: ({ message }) => {
       const newIdeas: Idea[] = [];
       const newDrafts: Draft[] = [];
@@ -585,7 +592,11 @@ export default function Jarvis() {
           }
         };
         u.onend = done;
-        u.onerror = done;
+        u.onerror = (ev) => {
+          // Autoplay policy: keep the text and speak it on the next tap / wake word
+          if ((ev as SpeechSynthesisErrorEvent).error === "not-allowed") blockedSpeechRef.current.push(line);
+          done();
+        };
         window.speechSynthesis.speak(u);
       });
     },
@@ -603,6 +614,83 @@ export default function Jarvis() {
     hideSubs();
     listenerRef.current?.resume(150);
   }, [hideSubs]);
+
+  /** Speak lines that the browser refused to play before the first user gesture. */
+  const replayBlocked = useCallback(() => {
+    if (!blockedSpeechRef.current.length) return false;
+    const text = blockedSpeechRef.current.join(" ");
+    blockedSpeechRef.current = [];
+    say(text);
+    return true;
+  }, [say]);
+
+  // ---------- Daily morning greeting (once per Vienna day, on the first activation) ----------
+  useEffect(() => {
+    const id = setTimeout(() => {
+      const enabled = localStorage.getItem(MORNING_ENABLED_KEY) !== "0";
+      morningEnabledRef.current = enabled;
+      setMorningEnabled(enabled);
+    }, 0);
+    return () => clearTimeout(id);
+  }, []);
+  const morningDue = () => {
+    try {
+      return shouldGreet(localStorage.getItem(MORNING_KEY), Date.now(), morningEnabledRef.current);
+    } catch {
+      return false;
+    }
+  };
+  const fetchMorning = useCallback((): Promise<string | null> => {
+    const req = fetch("/api/morning", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        mode: personaRef.current,
+        lang: langRef.current,
+        population: popRef.current.count,
+        ...(personaRef.current === "purple" ? { siem: siemSummaryRef.current } : {}),
+      }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: { text?: string } | null) => (j?.text?.trim() ? j.text.trim() : null))
+      .catch(() => null);
+    morningRef.current = { promise: req, text: null };
+    void req.then((t) => {
+      if (morningRef.current?.promise === req) morningRef.current.text = t;
+    });
+    return req;
+  }, []);
+  /** Puts the greeting into the conversation; the stream→speech effect then speaks it and shows subtitles. */
+  const deliverMorning = useCallback(
+    (text: string) => {
+      try {
+        localStorage.setItem(MORNING_KEY, viennaDate(Date.now()));
+      } catch {}
+      morningRef.current = null;
+      setMorningPreview(null);
+      setMessages((prev) => [...prev, { id: `morning-${Date.now()}`, role: "assistant", parts: [{ type: "text", text }] }]);
+    },
+    [setMessages],
+  );
+  // Before the first tap: prefetch today's greeting and show it as a silent preview (autoplay is blocked)
+  useEffect(() => {
+    const id = setTimeout(() => {
+      if (!morningDue()) return;
+      void fetchMorning().then((t) => t && !bootedRef.current && setMorningPreview(t));
+    }, 50);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // While running: a new Vienna day starts → greet at the next check (sticky user activation allows TTS)
+  useEffect(() => {
+    if (!booted) return;
+    const id = setInterval(() => {
+      if (!morningDue() || morningRef.current || busyRef.current || speakingRef.current) return;
+      void fetchMorning().then((t) => t && deliverMorning(t));
+    }, 60_000);
+    return () => clearInterval(id);
+     
+  }, [booted, fetchMorning, deliverMorning]);
 
   // ---------- Sending ----------
   const submit = useCallback(
@@ -668,6 +756,7 @@ export default function Jarvis() {
         onDebug: pushDebug,
         onWake: () => {
           beep(1046);
+          replayBlocked();
           lastHeardRef.current = performance.now();
           setPartial("");
           if (busyRef.current) stop(); // barge-in while thinking
@@ -697,7 +786,7 @@ export default function Jarvis() {
     listenerRef.current = l;
     if (speakingRef.current) l.pause();
     l.setEnabled(true);
-  }, [beep, pushDebug, stop, submit]);
+  }, [beep, pushDebug, stop, submit, replayBlocked]);
 
   // When the assistant finishes talking, resume listening
   useEffect(() => {
@@ -707,11 +796,15 @@ export default function Jarvis() {
   /** Mic button / space bar: "talk now" without the wake word. */
   const talkNow = useCallback(() => {
     if (!srSupported || !booted) return;
+    if (blockedSpeechRef.current.length) {
+      replayBlocked();
+      return;
+    }
     shutUp();
     if (!micOn) setMicOn(true);
     beep(880);
     listenerRef.current?.arm(8000);
-  }, [srSupported, booted, shutUp, micOn, beep]);
+  }, [srSupported, booted, shutUp, micOn, beep, replayBlocked]);
 
   // Space bar = talk now
   useEffect(() => {
@@ -770,13 +863,23 @@ export default function Jarvis() {
       window.speechSynthesis.speak(unlock);
     }
     setBooted(true);
+    bootedRef.current = true;
     const ok = await ensureAudio();
     beep(660);
     setTimeout(() => beep(990), 140);
-    const g = greeting(langRef.current, personaRef.current);
     if (ok) startListener();
+    // First activation today → the morning greeting replaces the standard greeting
+    if (morningDue()) {
+      const pending = morningRef.current?.text ?? (await Promise.race([morningRef.current?.promise ?? fetchMorning(), new Promise<null>((r) => setTimeout(() => r(null), 8000))]));
+      if (pending) {
+        setTimeout(() => deliverMorning(pending), 250);
+        return;
+      }
+    }
+    const g = greeting(langRef.current, personaRef.current);
     setTimeout(() => say(g), 350);
-  }, [ensureAudio, beep, say, startListener]);
+     
+  }, [ensureAudio, beep, say, startListener, fetchMorning, deliverMorning]);
 
   // ---------- Derived UI ----------
   const listening = armed;
@@ -1068,6 +1171,21 @@ export default function Jarvis() {
           android={isAndroidUA}
           onClear={() => setDebugLog([])}
           onClose={() => setDebugOpen(false)}
+          morningEnabled={morningEnabled}
+          onToggleMorning={() => {
+            const next = !morningEnabled;
+            morningEnabledRef.current = next;
+            setMorningEnabled(next);
+            try {
+              localStorage.setItem(MORNING_ENABLED_KEY, next ? "1" : "0");
+            } catch {}
+          }}
+          onMorningNow={() => {
+            try {
+              localStorage.removeItem(MORNING_KEY);
+            } catch {}
+            void fetchMorning().then((t) => t && deliverMorning(t));
+          }}
         />
       )}
       {logOpen && <LogPanel entries={log} aiLabel={aiLabel} userLabel={userLabel} onClose={() => setLogOpen(false)} />}
@@ -1106,6 +1224,7 @@ export default function Jarvis() {
       {/* Boot overlay (a tap is needed for audio + mic permissions) */}
       {!booted && (
         <div className="boot-out absolute inset-0 z-30 grid place-items-center bg-bg/70 backdrop-blur-sm">
+          <div className="flex w-full max-w-md flex-col items-center gap-5 px-6">
           <button
             type="button"
             onClick={boot}
@@ -1117,6 +1236,16 @@ export default function Jarvis() {
             </span>
             <span className="font-display text-sm tracking-[0.4em] text-accent-200">{t.boot}</span>
           </button>
+          {morningPreview && (
+            <div className="fade-in w-full text-center">
+              <p className="mb-1 font-mono text-[10px] tracking-widest text-accent-400/80">☀ MORGENGRUSS · TIPPEN ZUM ANHÖREN</p>
+              <Subtitles
+                lines={[{ id: 1, text: splitSubtitles(morningPreview).slice(0, 2).join(" ") + (splitSubtitles(morningPreview).length > 2 ? " …" : ""), out: false }]}
+                label={aiLabel}
+              />
+            </div>
+          )}
+          </div>
         </div>
       )}
     </main>

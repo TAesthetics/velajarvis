@@ -54,7 +54,7 @@ function mergeGreedy(pieces: string[], max: number, minLen = 0): string[] {
 export function splitSubtitles(text: string, max = SUB_MAX): string[] {
   const clean = cleanForSpeech(text);
   if (!clean) return [];
-  const sentences = clean.split(/(?<=[.!?…])\s+(?=\S)/);
+  const sentences = clean.split(/(?<=[^\d\s][.!?…])\s+(?=\S)/); // keep "29. Oktober" together
   const lines: string[] = [];
   for (const s of sentences) {
     if (s.length <= max) {

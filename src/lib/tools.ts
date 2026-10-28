@@ -238,6 +238,7 @@ export const marketingTools = {
           recentCommits: commits.map((c) => ({
             sha: c.sha.slice(0, 7),
             date: fmt(c.commit.author.date),
+            dateIso: c.commit.author.date,
             message: c.commit.message.split("\n")[0],
           })),
           openIssues: issues.filter((i) => !i.pull_request).map((i) => ({ number: i.number, title: i.title })),

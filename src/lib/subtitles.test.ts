@@ -29,3 +29,7 @@ test("reading time is bounded", () => {
   assert.equal(readingMs("a"), 1400);
   assert.equal(readingMs("x".repeat(500)), 7000);
 });
+
+test("does not break after ordinal numbers", () => {
+  assert.deepEqual(splitSubtitles("Heute ist der 29. Oktober."), ["Heute ist der 29. Oktober."]);
+});

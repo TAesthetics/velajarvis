@@ -98,6 +98,21 @@ curl -X POST https://velajarvis.vercel.app/api/siem/ingest \
   --data '[{"timestamp":"2026-10-28T20:00:00Z","ip":"203.0.113.66","user":"admin","message":"Login failed"}]'
 ```
 
+## Morgengruß (1× pro Tag)
+
+Bei der ersten Aktivierung jedes Tages (Datum nach **Europe/Vienna**, gemerkt in `localStorage`) begrüßt dich die aktive Persona mit einem kurzen Gruß.
+
+- **Inhalt**: das heutige Datum, das Wetter in Wien (Open-Meteo) und eine Vela-Statuszeile (neue Commits und offene Issues aus dem GitHub-Repo), optional ein Fokus für den Tag.
+- **Länge**: maximal 2–3 Sätze, gesprochen und als Untertitel.
+- **Je Persona**:
+  - THRONG: „Guten Morgen, Terence. Wir sind schon wach …"
+  - JARVIS: „Guten Morgen, Sir …"
+  - PURPLE: ein kurzes Sicherheits-Briefing inklusive SIEM-Lage
+- **Uhrzeit**: Vor 5:00 und ab 11:00 kommt „Guten Tag" bzw. „Guten Abend". Der erste Gruß des Tages findet trotzdem statt.
+- **Autoplay**: Browser blockieren Audio vor der ersten Interaktion. Deshalb wird der Gruß vorab geladen und als Untertitel im Start-Overlay gezeigt; gesprochen wird er beim ersten Tippen. Bleibt die App über Mitternacht offen, kommt der Gruß beim nächsten Check (jede Minute). Wird die Sprachausgabe blockiert, wird sie beim nächsten Tippen oder Wake-Word nachgeholt.
+- **Ein-/Ausschalten**: im Debug-Panel (Titel lange drücken), Option „Morgengruß", Standard an. Mit „jetzt testen" kommt der Gruß sofort.
+- **Endpunkt**: `POST /api/morning` mit `{ mode, lang }`.
+
 ## Immer zuhören (wie in den TikTok-Demos)
 
 Nach dem Start-Tipp („Schwarm wecken" / „J.A.R.V.I.S. erwecken") ist das Mikro **dauerhaft offen**, kein Button nötig:

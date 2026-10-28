@@ -12,6 +12,9 @@ export default function DebugPanel({
   android,
   onClear,
   onClose,
+  morningEnabled,
+  onToggleMorning,
+  onMorningNow,
 }: {
   log: ListenerDebugEvent[];
   srSupported: boolean;
@@ -22,6 +25,9 @@ export default function DebugPanel({
   android: boolean;
   onClear: () => void;
   onClose: () => void;
+  morningEnabled: boolean;
+  onToggleMorning: () => void;
+  onMorningNow: () => void;
 }) {
   return (
     <div className="panel-in absolute left-3 top-16 z-50 max-h-[55dvh] w-[min(94vw,420px)] overflow-hidden rounded-xl border border-emerald-400/40 bg-black/90 font-mono text-[11px] text-emerald-200 shadow-xl select-text">
@@ -38,6 +44,15 @@ export default function DebugPanel({
             ✕
           </button>
         </span>
+      </div>
+      <div className="flex items-center gap-3 border-b border-emerald-400/30 px-3 py-2">
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={morningEnabled} onChange={onToggleMorning} className="accent-emerald-400" />
+          Morgengruß (1× pro Tag)
+        </label>
+        <button type="button" onClick={onMorningNow} className="ml-auto rounded border border-emerald-400/40 px-2 py-0.5">
+          jetzt testen
+        </button>
       </div>
       <div className="max-h-[48dvh] overflow-y-auto px-3 py-2">
         {!srSupported && <p className="text-rose-300">SpeechRecognition wird von diesem Browser nicht unterstützt.</p>}
