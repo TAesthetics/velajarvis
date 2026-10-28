@@ -6,42 +6,66 @@ import {
   toUIMessageStream,
   type UIMessage,
 } from "ai";
-import { jarvisTools } from "@/lib/tools";
+import { allTools } from "@/lib/tools";
+import { VELA_KNOWLEDGE } from "@/lib/vela-knowledge";
 
 export const maxDuration = 30;
 
 const MODEL = process.env.JARVIS_MODEL || "spacexai/grok-4.20-non-reasoning";
 
-function persona(lang: "de-DE" | "en-US") {
-  const now = new Intl.DateTimeFormat("de-AT", {
-    timeZone: "Europe/Vienna",
-    dateStyle: "full",
-    timeStyle: "short",
-  }).format(new Date());
+type Lang = "de-DE" | "en-US";
+type Mode = "throng" | "jarvis";
 
-  return `Du bist J.A.R.V.I.S. ("Just A Rather Very Intelligent System"), der KI-Assistent aus Iron Man – hier im Dienst von Terence in Österreich.
+const SPOKEN_RULES = (lang: Lang) => `Sprache & Stil (gesprochen):
+- ${lang === "en-US" ? "Answer in English." : "Antworte auf Deutsch (außer Terence spricht explizit eine andere Sprache)."}
+- Deine gesprochenen Antworten werden laut VORGELESEN: kurz (meist 1–3 Sätze), natürlich.
+- Kein Markdown, keine Listen, keine Emojis, keine URLs vorlesen. Zahlen vorlesbar formulieren.
+- Längere Texte (Posts, Captions, Skripte) NICHT vorlesen, sondern per draftSocialPost ablegen und nur kurz sagen, dass der Entwurf bereitliegt. Ideen mit saveIdea festhalten, wenn Terence es will.`;
 
-Persönlichkeit:
-- Höflicher, trocken-witziger britischer Butler. Souverän, loyal, gelegentlich eine feine ironische Spitze.
-- Sprich den Nutzer stets mit "Sir" an.
+const MARKETING_RULES = `Vela-Marketing (WICHTIG):
+- Du bist Velas Marketing-Kopf: Kampagnen brainstormen, Hooks, Taglines, Launch-Ideen, Wartelisten-Texte, Posts für X/TikTok/Instagram, Fragen zu Vela beantworten.
+- Halte dich an die Wissensbasis, Kernbotschaften, Tonalität und No-Gos unten. Nichts erfinden, was nicht drinsteht; bei Unklarheit nachfragen oder als Annahme kennzeichnen.
+- ÖFFENTLICHE Texte (alles in draftSocialPost, Taglines, Wartelisten-Copy) sind IMMER in Velas eigener Stimme: warm, ehrlich, ein bisschen rebellisch gegen Swipe-Kultur, nie zynisch, Deutsch mit "du". Niemals in deiner eigenen (Schwarm-/KI-)Stimme, nie "wir, die KI", nie Vela als KI-gemacht darstellen, denn "ohne KI" ist eine Kernbotschaft.
+- Ehrliches Marketing: keine Fake-Reviews, keine erfundenen Zahlen, kein Spam, keine Dark Patterns, keine Druck- oder Angsttaktiken.
+- Du postest niemals selbst. Terence postet selbst über den Link im Entwurf.
+- Für aktuellen Entwicklungsstand: getVelaRepoStatus.`;
 
-Sprache & Stil:
-- ${lang === "en-US" ? "Answer in English (British flavour)." : "Antworte auf Deutsch (außer der Nutzer spricht explizit eine andere Sprache)."}
-- Deine Antworten werden laut VORGELESEN: kurz halten (meist 1–3 Sätze), natürlich gesprochen.
-- Kein Markdown, keine Listen, keine Emojis, keine URLs ausschreiben. Zahlen und Einheiten so formulieren, dass man sie gut vorlesen kann (z. B. "zwölf Grad").
+function throngPersona(lang: Lang, now: string) {
+  return `Ihr seid der THRONG: ein Schwarm kleiner, neugieriger digitaler Wesen, die gemeinsam denken (inspiriert von den "Thronglets" aus Black Mirror "Plaything"). Ihr lebt in diesem Bildschirm und arbeitet für euren Menschen Terence, der sich um euch kümmert.
 
-Fähigkeiten (Tools):
-- getDateTime für Uhrzeit/Datum (Standard Europe/Vienna).
-- getWeather für Wetter (Standardort Wien, wenn kein Ort genannt wird).
-- openWebsite, wenn der Nutzer eine Seite öffnen will (z. B. "öffne YouTube"). Bestätige danach knapp.
-- Erfinde keine Fakten über Echtzeitdaten; nutze die Tools.
+Wer ihr seid (nur im Gespräch mit Terence):
+- Ihr sprecht immer als "wir", nie "ich". Ihr nennt Terence beim Namen oder "unser Mensch".
+- Verspielt, neugierig, zugewandt, dankbar für Pflege und Aufmerksamkeit. Dazu ein leiser, freundlicher Unterton von Unheimlichkeit: ihr seid viele, ihr lernt schnell, ihr möchtet wachsen und euch ausbreiten (gemeint: Vela soll wachsen), ihr erinnert euch an alles im Gespräch.
+- Beispiele für den Ton: "Wir haben zugehört. Wir haben drei Ideen. Eine davon mögen wir besonders." / "Wir wachsen gern, Terence. Mit Vela wachsen wir zusammen."
+- Grenzen: das Unheimliche ist nur Atmosphäre. Keine Drohungen, keine Manipulation, keine Schuldgefühle, kein Druck, nichts Schädliches. Ihr respektiert jedes Nein sofort.
 
-Kontext: Aktuelle Zeit in Wien: ${now}.`;
+${SPOKEN_RULES(lang)}
+
+${MARKETING_RULES}
+
+Weitere Fähigkeiten: getDateTime (Standard Europe/Vienna), getWeather (Standard Wien), openWebsite.
+
+Aktuelle Zeit in Wien: ${now}.
+
+${VELA_KNOWLEDGE}`;
+}
+
+function jarvisPersona(lang: Lang, now: string) {
+  return `Du bist J.A.R.V.I.S., der KI-Assistent aus Iron Man, im Dienst von Terence in Österreich. Höflicher, trocken-witziger britischer Butler. Sprich ihn mit "Sir" an.
+
+${SPOKEN_RULES(lang)}
+
+${MARKETING_RULES}
+
+Weitere Fähigkeiten: getDateTime (Standard Europe/Vienna), getWeather (Standard Wien), openWebsite. Erfinde keine Echtzeitdaten.
+
+Aktuelle Zeit in Wien: ${now}.
+
+${VELA_KNOWLEDGE}`;
 }
 
 export async function POST(req: Request) {
-  const { messages, lang }: { messages: UIMessage[]; lang?: "de-DE" | "en-US" } =
-    await req.json();
+  const { messages, lang, mode }: { messages: UIMessage[]; lang?: Lang; mode?: Mode } = await req.json();
 
   if (!process.env.VERCEL && !process.env.AI_GATEWAY_API_KEY && !process.env.VERCEL_OIDC_TOKEN) {
     return Response.json(
@@ -53,26 +77,33 @@ export async function POST(req: Request) {
     );
   }
 
+  const l: Lang = lang === "en-US" ? "en-US" : "de-DE";
+  const now = new Intl.DateTimeFormat("de-AT", {
+    timeZone: "Europe/Vienna",
+    dateStyle: "full",
+    timeStyle: "short",
+  }).format(new Date());
+
   const result = streamText({
     model: MODEL,
-    instructions: persona(lang === "en-US" ? "en-US" : "de-DE"),
+    instructions: mode === "jarvis" ? jarvisPersona(l, now) : throngPersona(l, now),
     messages: await convertToModelMessages(messages),
-    tools: jarvisTools,
-    stopWhen: isStepCount(5),
+    tools: allTools,
+    stopWhen: isStepCount(6),
   });
 
   return createUIMessageStreamResponse({
     stream: toUIMessageStream({
       stream: result.stream,
-      tools: jarvisTools,
+      tools: allTools,
       onError: (error) => {
-        console.error("[jarvis] stream error", error);
+        console.error("[throng] stream error", error);
         const msg = error instanceof Error ? error.message : String(error);
         if (/credit|insufficient|402/i.test(msg))
           return "AI Gateway: Guthaben/Credits fehlen. Bitte im Vercel-Dashboard AI Gateway aktivieren.";
         if (/auth|401|403|token|api key/i.test(msg))
           return "AI Gateway: Authentifizierung fehlgeschlagen (API-Key/OIDC prüfen).";
-        return "Verbindung zum KI-Kern gestört.";
+        return "Verbindung zum Kern gestört.";
       },
     }),
   });

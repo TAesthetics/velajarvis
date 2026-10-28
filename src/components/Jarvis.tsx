@@ -8,7 +8,34 @@ import { getSpeechRecognition, pickVoice, type SpeechRec, type SRResultEvent } f
 type Lang = "de-DE" | "en-US";
 type ListenMode = "off" | "ptt" | "wake" | "wake-armed";
 
-const WAKE_RE = /\b(jarvis|jarvys|javis|dschawis|tschawis|dscharvis|travis)\b[\s,.!?:]*/i;
+const WAKE_RE = /\b(jarvis|jarvys|javis|dschawis|tschawis|dscharvis|travis|throng|throngs|schwarm)\b[\s,.!?:]*/i;
+
+type Mode = "throng" | "jarvis";
+
+const THRONG_TEXT = {
+  "de-DE": {
+    idle: "Wir warten",
+    listening: "Wir hören zu …",
+    thinking: "Wir denken gemeinsam …",
+    speaking: "Wir sprechen …",
+    error: "Wir sind gestört",
+    wake: 'Sag „Throng …" oder „Jarvis …"',
+    placeholder: "Sag uns, was Vela braucht …",
+    boot: "Schwarm wecken",
+    hold: "Leertaste halten oder Mikro tippen",
+  },
+  "en-US": {
+    idle: "We are waiting",
+    listening: "We are listening …",
+    thinking: "We think together …",
+    speaking: "We speak …",
+    error: "We are disturbed",
+    wake: 'Say "Throng …" or "Jarvis …"',
+    placeholder: "Tell us what Vela needs …",
+    boot: "Wake the swarm",
+    hold: "Hold space or tap the mic",
+  },
+} as const;
 
 const UI_TEXT = {
   "de-DE": {
@@ -35,12 +62,17 @@ const UI_TEXT = {
   },
 } as const;
 
-function greeting(lang: Lang) {
+function greeting(lang: Lang, mode: Mode = "jarvis") {
   const h = Number(
     new Intl.DateTimeFormat("en-GB", { hour: "numeric", hourCycle: "h23", timeZone: "Europe/Vienna" })
       .formatToParts(new Date())
       .find((p) => p.type === "hour")?.value ?? 12,
   );
+  if (mode === "throng") {
+    return lang === "en-US"
+      ? "Hello, Terence. We are awake. We are many. What shall we grow for Vela today?"
+      : "Hallo, Terence. Wir sind wach. Wir sind viele. Was sollen wir heute für Vela wachsen lassen?";
+  }
   if (lang === "en-US") {
     const p = h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
     return `${p}, Sir. All systems are online. How may I be of service?`;
@@ -59,6 +91,9 @@ function messageText(m: { parts: Array<{ type: string; text?: string }> }) {
 export default function Jarvis() {
   const [booted, setBooted] = useState(false);
   const [lang, setLang] = useState<Lang>("de-DE");
+  const [mode, setMode] = useState<Mode>("throng");
+  const [vault, setVault] = useState<Vault>({ ideas: [], drafts: [] });
+  const [vaultOpen, setVaultOpen] = useState(false);
   const [wakeEnabled, setWakeEnabled] = useState(false);
   const [muted, setMuted] = useState(false);
   const [listening, setListening] = useState(false);
@@ -77,6 +112,8 @@ export default function Jarvis() {
   const recRef = useRef<SpeechRec | null>(null);
   const modeRef = useRef<ListenMode>("off");
   const langRef = useRef(lang);
+  const personaRef = useRef<Mode>(mode);
+  const vaultSeen = useRef<Set<string>>(new Set());
   const wakeRef = useRef(wakeEnabled);
   const mutedRef = useRef(muted);
   const speakingRef = useRef(false);
@@ -95,6 +132,27 @@ export default function Jarvis() {
     langRef.current = lang;
   }, [lang]);
   useEffect(() => {
+    personaRef.current = mode;
+  }, [mode]);
+
+  // Vault (ideas + drafts) persisted in localStorage
+  useEffect(() => {
+    const id = setTimeout(() => {
+      const v = loadVault();
+      v.ideas.forEach((i) => vaultSeen.current.add(i.id));
+      v.drafts.forEach((d) => vaultSeen.current.add(d.id));
+      setVault(v);
+    }, 0);
+    return () => clearTimeout(id);
+  }, []);
+  const updateVault = useCallback((fn: (v: Vault) => Vault) => {
+    setVault((prev) => {
+      const next = fn(prev);
+      saveVault(next);
+      return next;
+    });
+  }, []);
+  useEffect(() => {
     wakeRef.current = wakeEnabled;
   }, [wakeEnabled]);
   useEffect(() => {
@@ -108,6 +166,30 @@ export default function Jarvis() {
   }, [voiceURI]);
 
   const { messages, sendMessage, status, error, stop, clearError } = useChat({
+    onFinish: ({ message }) => {
+      const newIdeas: Idea[] = [];
+      const newDrafts: Draft[] = [];
+      for (const p of message.parts) {
+        const part = p as { type: string; toolCallId?: string; state?: string; output?: Record<string, unknown> };
+        if (part.state !== "output-available" || !part.output || !part.toolCallId) continue;
+        if (vaultSeen.current.has(part.toolCallId)) continue;
+        if (part.type === "tool-saveIdea" && part.output.title) {
+          vaultSeen.current.add(part.toolCallId);
+          newIdeas.push({ ...(part.output as unknown as Idea), id: part.toolCallId });
+        } else if (part.type === "tool-draftSocialPost" && part.output.text) {
+          vaultSeen.current.add(part.toolCallId);
+          newDrafts.push({
+            ...(part.output as unknown as Draft),
+            id: part.toolCallId,
+            createdAt: new Date().toISOString(),
+          });
+        }
+      }
+      if (newIdeas.length || newDrafts.length) {
+        updateVault((v) => ({ ideas: [...newIdeas, ...v.ideas], drafts: [...newDrafts, ...v.drafts] }));
+        setVaultOpen(true);
+      }
+    },
     onError: (e) => {
       let msg = e.message;
       try {
@@ -231,8 +313,9 @@ export default function Jarvis() {
     const v = pickVoice(voicesRef.current, langRef.current, voiceURIRef.current || undefined);
     if (v) u.voice = v;
     u.lang = v?.lang ?? langRef.current;
-    u.rate = 1.02;
-    u.pitch = 0.78; // deeper
+    const throng = personaRef.current === "throng";
+    u.rate = throng ? 0.96 : 1.02;
+    u.pitch = throng ? 1.25 : 0.78; // swarm: lighter & a touch uncanny; Jarvis: deeper
     pendingUtterances.current += 1;
     utteranceKeep.current.push(u);
     speakingRef.current = true;
@@ -279,7 +362,7 @@ export default function Jarvis() {
       clearError();
       shutUp();
       if (busyRef.current) stop();
-      sendMessage({ text: t }, { body: { lang: langRef.current } });
+      sendMessage({ text: t }, { body: { lang: langRef.current, mode: personaRef.current } });
     },
     [sendMessage, shutUp, stop, clearError],
   );
@@ -517,7 +600,7 @@ export default function Jarvis() {
     await ensureMic();
     beep(660);
     setTimeout(() => beep(990), 140);
-    const g = greeting(langRef.current);
+    const g = greeting(langRef.current, personaRef.current);
     setGreetingText(g);
     setTimeout(() => speak(g), 350);
   }, [ensureMic, beep, speak]);
@@ -525,7 +608,9 @@ export default function Jarvis() {
   // ---------- Derived UI ----------
   const orbState: OrbState =
     hudError || error ? "error" : speaking ? "speaking" : listening ? "listening" : busy ? "thinking" : "idle";
-  const t = UI_TEXT[lang];
+  const t = mode === "throng" ? THRONG_TEXT[lang] : UI_TEXT[lang];
+  const aiLabel = mode === "throng" ? "WIR" : "JARVIS";
+  const userLabel = mode === "throng" ? "TERENCE" : "SIR";
   const statusLabel =
     orbState === "idle" && wakeEnabled ? t.wake : t[orbState === "error" ? "error" : orbState];
 
@@ -548,20 +633,24 @@ export default function Jarvis() {
   );
 
   return (
-    <main className="relative flex h-dvh w-full flex-col overflow-hidden bg-[#02060c] text-cyan-100 select-none">
+    <main
+      className={`relative flex h-dvh w-full flex-col overflow-hidden bg-[#02060c] text-cyan-100 select-none ${
+        mode === "throng" ? "throng" : ""
+      }`}
+    >
       {/* Background: grid + vignette + scanlines */}
-      <div className="pointer-events-none absolute inset-0 jarvis-grid opacity-40" />
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_center,rgba(0,140,255,0.12)_0%,rgba(2,6,12,0.0)_35%,rgba(2,6,12,0.95)_80%)]" />
+      <div className="hud pointer-events-none absolute inset-0 jarvis-grid opacity-40" />
+      <div className="hud pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_center,rgba(0,140,255,0.12)_0%,rgba(2,6,12,0.0)_35%,rgba(2,6,12,0.95)_80%)]" />
       <div className="pointer-events-none absolute inset-0 jarvis-scan" />
 
       {/* HUD top bar */}
-      <header className="relative z-10 flex items-start justify-between px-5 pt-4 sm:px-8 sm:pt-6">
+      <header className="hud relative z-10 flex items-start justify-between px-5 pt-4 sm:px-8 sm:pt-6">
         <div>
           <h1 className="font-display text-xl tracking-[0.45em] text-cyan-300 drop-shadow-[0_0_10px_rgba(0,200,255,0.8)] sm:text-2xl">
-            J.A.R.V.I.S.
+            {mode === "throng" ? "T.H.R.O.N.G." : "J.A.R.V.I.S."}
           </h1>
           <p className="mt-1 text-[10px] uppercase tracking-[0.3em] text-cyan-500/70">
-            Just A Rather Very Intelligent System
+            {mode === "throng" ? "Wir sind Velas Marketing · Wir sind viele" : "Just A Rather Very Intelligent System"}
           </p>
         </div>
         <div className="text-right font-mono text-xs text-cyan-400/80">
@@ -573,8 +662,8 @@ export default function Jarvis() {
       {/* Orb */}
       <section className="relative z-0 flex flex-1 items-center justify-center">
         <div className="relative aspect-square w-[min(94vw,70vh)]">
-          <Orb state={orbState} levelRef={levelRef} />
-          <div className="pointer-events-none absolute inset-x-0 bottom-[6%] text-center">
+          <Orb state={orbState} levelRef={levelRef} variant={mode} />
+          <div className="hud pointer-events-none absolute inset-x-0 bottom-[6%] text-center">
             <span
               className={`font-display text-[11px] uppercase tracking-[0.4em] ${
                 orbState === "error" ? "text-rose-300" : "text-cyan-200/90"
@@ -587,21 +676,21 @@ export default function Jarvis() {
       </section>
 
       {/* Transcript */}
-      <aside className="pointer-events-none absolute left-1/2 top-[64%] z-10 w-[min(92vw,640px)] -translate-x-1/2 sm:top-auto sm:bottom-32 sm:left-6 sm:w-[340px] sm:translate-x-0">
+      <aside className="hud pointer-events-none absolute left-1/2 top-[64%] z-10 w-[min(92vw,640px)] -translate-x-1/2 sm:top-auto sm:bottom-32 sm:left-6 sm:w-[340px] sm:translate-x-0">
         <div className="space-y-1.5 text-[13px] leading-snug">
           {greetingText && transcript.length === 0 && (
             <p className="text-cyan-100/80">
-              <span className="mr-2 font-mono text-[10px] text-cyan-400">JARVIS</span>
+              <span className="mr-2 font-mono text-[10px] text-cyan-400">{aiLabel}</span>
               {greetingText}
             </p>
           )}
           {transcript.map((m) => (
             <p key={m.id} className={m.role === "user" ? "text-slate-300/70" : "text-cyan-100/90"}>
               <span className={`mr-2 font-mono text-[10px] ${m.role === "user" ? "text-slate-400" : "text-cyan-400"}`}>
-                {m.role === "user" ? "SIR" : "JARVIS"}
+                {m.role === "user" ? userLabel : aiLabel}
               </span>
               {m.tools.length > 0 && !m.text && (
-                <span className="font-mono text-[11px] text-cyan-500/70">[{m.tools.join(", ")}] </span>
+                <span className="font-mono text-[11px] text-cyan-500/70">[{m.tools.map((x) => TOOL_LABELS[x] ?? x).join(", ")}] </span>
               )}
               {m.text}
               {m.links.map((url) => (
@@ -619,7 +708,7 @@ export default function Jarvis() {
           ))}
           {partial && (
             <p className="italic text-slate-300/60">
-              <span className="mr-2 font-mono text-[10px] text-slate-400">SIR</span>
+              <span className="mr-2 font-mono text-[10px] text-slate-400">{userLabel}</span>
               {partial}
             </p>
           )}
@@ -630,8 +719,25 @@ export default function Jarvis() {
       </aside>
 
       {/* Controls */}
-      <footer className="relative z-20 flex flex-col items-center gap-3 px-4 pb-5 sm:pb-7">
-        <div className="flex items-center gap-3">
+      <footer className="hud relative z-20 flex flex-col items-center gap-3 px-4 pb-5 sm:pb-7">
+        <div className="flex flex-wrap items-center justify-center gap-2 sm:gap-3">
+          <ToggleChip
+            active
+            onClick={() => {
+              shutUp();
+              const next: Mode = mode === "throng" ? "jarvis" : "throng";
+              setMode(next);
+              personaRef.current = next;
+              if (booted) {
+                const g = greeting(lang, next);
+                setGreetingText(g);
+                speak(g);
+              }
+            }}
+            title="Persona wechseln"
+          >
+            {mode === "throng" ? "THRONG" : "JARVIS"}
+          </ToggleChip>
           <ToggleChip active={lang === "de-DE"} onClick={() => setLang(lang === "de-DE" ? "en-US" : "de-DE")}>
             {lang === "de-DE" ? "DE" : "EN"}
           </ToggleChip>
@@ -676,6 +782,9 @@ export default function Jarvis() {
               </option>
             ))}
           </select>
+          <ToggleChip active={vaultOpen} onClick={() => setVaultOpen((o) => !o)} title="Ideen & Entwürfe">
+            VAULT {vault.ideas.length + vault.drafts.length > 0 ? vault.ideas.length + vault.drafts.length : ""}
+          </ToggleChip>
         </div>
 
         <form
@@ -704,6 +813,15 @@ export default function Jarvis() {
           {srSupported ? t.hold : "Spracherkennung nicht unterstützt – Texteingabe aktiv (Chrome/Edge empfohlen)"}
         </p>
       </footer>
+
+      {vaultOpen && (
+        <VaultPanel
+          vault={vault}
+          onClose={() => setVaultOpen(false)}
+          onDeleteIdea={(id) => updateVault((v) => ({ ...v, ideas: v.ideas.filter((i) => i.id !== id) }))}
+          onDeleteDraft={(id) => updateVault((v) => ({ ...v, drafts: v.drafts.filter((d) => d.id !== id) }))}
+        />
+      )}
 
       {/* Boot overlay (needed for audio/mic permissions) */}
       {!booted && (
@@ -755,5 +873,199 @@ function MicIcon({ className }: { className?: string }) {
       <rect x="9" y="3" width="6" height="11" rx="3" />
       <path d="M5 11a7 7 0 0 0 14 0M12 18v3" strokeLinecap="round" />
     </svg>
+  );
+}
+
+// ---------------- Vault (ideas + drafts) ----------------
+
+const TOOL_LABELS: Record<string, string> = {
+  draftSocialPost: "Entwurf abgelegt",
+  saveIdea: "Idee gespeichert",
+  getVelaRepoStatus: "Repo gelesen",
+  getDateTime: "Uhrzeit",
+  getWeather: "Wetter",
+  openWebsite: "Website",
+};
+
+type Idea = { id: string; title: string; detail: string; channel?: string; tags?: string[]; createdAt: string };
+type Draft = {
+  id: string;
+  platform: string;
+  text: string;
+  hook?: string;
+  visualIdea?: string;
+  chars: number;
+  limit: number;
+  tooLong: boolean;
+  postUrl?: string;
+  createdAt: string;
+};
+type Vault = { ideas: Idea[]; drafts: Draft[] };
+
+const VAULT_KEY = "throng.vela.vault.v1";
+
+function loadVault(): Vault {
+  try {
+    const raw = localStorage.getItem(VAULT_KEY);
+    if (!raw) return { ideas: [], drafts: [] };
+    const v = JSON.parse(raw) as Partial<Vault>;
+    return { ideas: v.ideas ?? [], drafts: v.drafts ?? [] };
+  } catch {
+    return { ideas: [], drafts: [] };
+  }
+}
+
+function saveVault(v: Vault) {
+  try {
+    localStorage.setItem(VAULT_KEY, JSON.stringify(v));
+  } catch {}
+}
+
+function vaultMarkdown(v: Vault) {
+  const lines = [`# Vela – Ideen & Entwürfe`, ``, `Export: ${new Date().toLocaleString("de-AT", { timeZone: "Europe/Vienna" })}`, ``, `## Ideen`, ``];
+  for (const i of v.ideas) {
+    lines.push(`### ${i.title}${i.channel ? ` (${i.channel})` : ""}`, ``, i.detail, ``);
+    if (i.tags?.length) lines.push(`Tags: ${i.tags.join(", ")}`, ``);
+  }
+  lines.push(`## Post-Entwürfe`, ``);
+  for (const d of v.drafts) {
+    lines.push(`### ${PLATFORM_NAMES[d.platform] ?? d.platform}`, ``);
+    if (d.hook) lines.push(`**Hook:** ${d.hook}`, ``);
+    lines.push(d.text, ``);
+    if (d.visualIdea) lines.push(`**Visual:** ${d.visualIdea}`, ``);
+  }
+  return lines.join("\n");
+}
+
+function download(name: string, content: string, type: string) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+const PLATFORM_NAMES: Record<string, string> = {
+  x: "X",
+  tiktok: "TikTok",
+  instagram: "Instagram",
+  threads: "Threads",
+  linkedin: "LinkedIn",
+};
+
+function VaultPanel({
+  vault,
+  onClose,
+  onDeleteIdea,
+  onDeleteDraft,
+}: {
+  vault: Vault;
+  onClose: () => void;
+  onDeleteIdea: (id: string) => void;
+  onDeleteDraft: (id: string) => void;
+}) {
+  const [tab, setTab] = useState<"drafts" | "ideas">("drafts");
+  const [copied, setCopied] = useState<string | null>(null);
+  const copy = (id: string, text: string) => {
+    void navigator.clipboard?.writeText(text);
+    setCopied(id);
+    setTimeout(() => setCopied(null), 1200);
+  };
+  return (
+    <div className="hud absolute inset-x-3 bottom-3 top-20 z-40 flex flex-col rounded-2xl border border-cyan-400/30 bg-[#030a14]/90 shadow-[0_0_40px_rgba(0,180,255,0.2)] backdrop-blur-md select-text sm:inset-x-auto sm:right-5 sm:top-24 sm:bottom-40 sm:w-[380px]">
+      <div className="flex items-center justify-between border-b border-cyan-400/20 px-4 py-3">
+        <div className="flex gap-2">
+          {(["drafts", "ideas"] as const).map((k) => (
+            <button
+              key={k}
+              type="button"
+              onClick={() => setTab(k)}
+              className={`rounded-full px-3 py-1 font-display text-[10px] tracking-[0.2em] ${
+                tab === k ? "bg-cyan-400/20 text-cyan-100" : "text-cyan-400/60 hover:text-cyan-200"
+              }`}
+            >
+              {k === "drafts" ? `ENTWÜRFE ${vault.drafts.length}` : `IDEEN ${vault.ideas.length}`}
+            </button>
+          ))}
+        </div>
+        <button type="button" onClick={onClose} aria-label="Schließen" className="px-2 text-cyan-300/70 hover:text-cyan-100">
+          ✕
+        </button>
+      </div>
+
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4 text-[13px] leading-snug">
+        {tab === "drafts" &&
+          (vault.drafts.length === 0 ? (
+            <p className="text-cyan-400/60">Noch keine Entwürfe. Sag z. B.: „Schreib einen X-Post „über den Schleier.“</p>
+          ) : (
+            vault.drafts.map((d) => (
+              <div key={d.id} className="rounded-xl border border-cyan-400/20 bg-cyan-950/20 p-3">
+                <div className="mb-2 flex items-center justify-between font-mono text-[10px] text-cyan-400/80">
+                  <span>{PLATFORM_NAMES[d.platform] ?? d.platform}</span>
+                  <span className={d.tooLong ? "text-rose-300" : ""}>
+                    {d.chars}/{d.limit}
+                  </span>
+                </div>
+                {d.hook && <p className="mb-1 text-cyan-200/90">Hook: {d.hook}</p>}
+                <p className="whitespace-pre-wrap text-cyan-50">{d.text}</p>
+                {d.visualIdea && <p className="mt-2 text-[12px] text-cyan-300/70">Visual: {d.visualIdea}</p>}
+                <div className="mt-3 flex flex-wrap gap-2 font-mono text-[11px]">
+                  <button type="button" onClick={() => copy(d.id, d.text)} className="rounded-full border border-cyan-400/30 px-3 py-1 text-cyan-200 hover:bg-cyan-400/10">
+                    {copied === d.id ? "kopiert ✓" : "kopieren"}
+                  </button>
+                  {d.postUrl && (
+                    <a href={d.postUrl} target="_blank" rel="noopener noreferrer" className="rounded-full border border-cyan-300/50 px-3 py-1 text-cyan-100 hover:bg-cyan-400/15">
+                      selbst auf {PLATFORM_NAMES[d.platform]} posten ↗
+                    </a>
+                  )}
+                  <button type="button" onClick={() => onDeleteDraft(d.id)} className="ml-auto px-2 text-cyan-500/60 hover:text-rose-300">
+                    löschen
+                  </button>
+                </div>
+              </div>
+            ))
+          ))}
+
+        {tab === "ideas" &&
+          (vault.ideas.length === 0 ? (
+            <p className="text-cyan-400/60">Noch keine Ideen. Sag z. B.: „Merk dir die Idee …“</p>
+          ) : (
+            vault.ideas.map((i) => (
+              <div key={i.id} className="rounded-xl border border-cyan-400/20 bg-cyan-950/20 p-3">
+                <div className="flex items-start justify-between gap-2">
+                  <p className="font-medium text-cyan-50">{i.title}</p>
+                  {i.channel && <span className="shrink-0 font-mono text-[10px] text-cyan-400/80">{i.channel}</span>}
+                </div>
+                <p className="mt-1 text-cyan-100/80">{i.detail}</p>
+                <div className="mt-2 flex justify-end">
+                  <button type="button" onClick={() => onDeleteIdea(i.id)} className="font-mono text-[11px] text-cyan-500/60 hover:text-rose-300">
+                    löschen
+                  </button>
+                </div>
+              </div>
+            ))
+          ))}
+      </div>
+
+      <div className="flex gap-2 border-t border-cyan-400/20 px-4 py-3 font-mono text-[11px]">
+        <button
+          type="button"
+          onClick={() => download("vela-ideen.md", vaultMarkdown(vault), "text/markdown")}
+          className="rounded-full border border-cyan-400/30 px-3 py-1 text-cyan-200 hover:bg-cyan-400/10"
+        >
+          Export .md
+        </button>
+        <button
+          type="button"
+          onClick={() => download("vela-ideen.json", JSON.stringify(vault, null, 2), "application/json")}
+          className="rounded-full border border-cyan-400/30 px-3 py-1 text-cyan-200 hover:bg-cyan-400/10"
+        >
+          Export .json
+        </button>
+        <span className="ml-auto self-center text-cyan-500/50">nur in diesem Browser</span>
+      </div>
+    </div>
   );
 }

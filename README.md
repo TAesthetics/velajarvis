@@ -23,6 +23,20 @@ Eine Next.js-Web-App mit leuchtendem, animiertem Orb, Sprachsteuerung (Deutsch/E
   - `getWeather` – aktuelles Wetter + Vorhersage über [Open-Meteo](https://open-meteo.com) (kein API-Key nötig)
   - `openWebsite` – öffnet eine Seite in neuem Tab („Öffne YouTube")
 
+## Throng-Modus: Velas Marketing-Schwarm
+
+Standardmäßig startet die App im **THRONG**-Modus (Umschalter `THRONG / JARVIS` unten links). Inspiriert von den „Thronglets" aus *Black Mirror: Plaything*: ein Schwarm kleiner leuchtender Wesen, der als „wir" spricht, neugierig und verspielt ist, gern wachsen möchte und Terence als seinen Menschen behandelt. Das Unheimliche ist nur Atmosphäre: keine Manipulation, kein Druck.
+
+Der Schwarm ist **Velas Marketing-Kopf** (<https://github.com/TAesthetics/vela>): Kampagnen, Hooks, Taglines, Launch-Ideen, Wartelisten-Texte, Posts für X/TikTok/Instagram und Fragen zu Vela.
+
+- Wissensbasis & Markenlinie: `src/lib/vela-knowledge.ts` (Abschnitt „Kanäle & Launch-Fokus" ist zum Ergänzen da)
+- Öffentliche Texte schreibt der Schwarm **immer in Velas eigener Stimme** (warm, ehrlich, „du"), nie in der Schwarm-/KI-Stimme, denn „ohne KI" ist eine Kernbotschaft.
+- Neue Tools:
+  - `draftSocialPost` – legt einen Entwurf im **VAULT** ab (Zeichenzähler, Kopieren, bei X/Threads ein „selbst posten"-Link). Es wird **nie automatisch gepostet**.
+  - `getVelaRepoStatus` – Sterne, letzte Commits, offene Issues/PRs über die öffentliche GitHub-API (kein Token).
+  - `saveIdea` – speichert Ideen im VAULT (localStorage dieses Browsers), Export als Markdown oder JSON.
+- Wake Word: „Throng …", „Schwarm …" oder „Jarvis …".
+
 ## Tech-Stack
 
 - Next.js 16 (App Router, TypeScript, Tailwind CSS 4)

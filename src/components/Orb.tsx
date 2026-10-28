@@ -12,22 +12,48 @@ const PALETTE: Record<OrbState, [number, number, number]> = {
   error: [255, 70, 95],
 };
 
+const THRONG_PALETTE: Record<OrbState, [number, number, number]> = {
+  idle: [255, 176, 84],
+  listening: [255, 128, 172],
+  thinking: [176, 120, 255],
+  speaking: [255, 206, 96],
+  error: [255, 70, 95],
+};
+
+type Creature = {
+  a: number;
+  r: number;
+  speed: number;
+  phase: number;
+  size: number;
+  tint: number;
+  blinkAt: number;
+  x: number;
+  y: number;
+};
+
 type Particle = { r: number; theta: number; phi: number; speed: number; size: number; tilt: number };
 
 export default function Orb({
   state,
   levelRef,
+  variant = "jarvis",
 }: {
   state: OrbState;
+  variant?: "jarvis" | "throng";
   /** 0..1 audio level, written by mic analyser / speech simulation */
   levelRef: React.RefObject<number>;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stateRef = useRef<OrbState>(state);
+  const variantRef = useRef(variant);
 
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
+  useEffect(() => {
+    variantRef.current = variant;
+  }, [variant]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -60,6 +86,18 @@ export default function Orb({
       tilt: (Math.random() - 0.5) * 0.6,
     }));
 
+    const creatures: Creature[] = Array.from({ length: 72 }, () => ({
+      a: Math.random() * Math.PI * 2,
+      r: 0.25 + Math.pow(Math.random(), 0.7) * 1.25,
+      speed: (0.15 + Math.random() * 0.35) * (Math.random() < 0.8 ? 1 : -1),
+      phase: Math.random() * Math.PI * 2,
+      size: 0.6 + Math.random() * 0.7,
+      tint: (Math.random() - 0.5) * 60,
+      blinkAt: performance.now() + Math.random() * 6000,
+      x: 0,
+      y: 0,
+    }));
+
     const color = [...PALETTE.idle] as [number, number, number];
     let energy = 0;
     let spin = 0;
@@ -71,12 +109,95 @@ export default function Orb({
         color[2] + boost,
       )},${a})`;
 
+    const drawThrong = (now: number, t: number, dt: number, cx: number, cy: number, R: number, st: OrbState) => {
+      const swirl = st === "thinking" ? 3.2 : st === "listening" ? 0.6 : st === "speaking" ? 1.2 : 0.45;
+      const gather = st === "listening" ? 0.82 : st === "thinking" ? 0.95 : 1;
+      const unit = R / 120;
+
+      // soft nest glow
+      const nest = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * (0.9 + energy * 0.4));
+      nest.addColorStop(0, rgba(0.35 + energy * 0.3, 40));
+      nest.addColorStop(1, rgba(0));
+      ctx.fillStyle = nest;
+      ctx.beginPath();
+      ctx.arc(cx, cy, R * (0.9 + energy * 0.4), 0, Math.PI * 2);
+      ctx.fill();
+
+      for (const c of creatures) {
+        c.a += dt * c.speed * swirl;
+        const wob = Math.sin(t * 1.7 + c.phase) * 0.08 + Math.sin(t * 0.6 + c.phase * 2) * 0.05;
+        const bounce = st === "speaking" ? energy * 0.25 * Math.abs(Math.sin(t * 7 + c.phase)) : energy * 0.1;
+        const rr = R * 1.02 * gather * (c.r + wob + bounce);
+        const tx = cx + Math.cos(c.a) * rr;
+        const ty = cy + Math.sin(c.a) * rr * 0.86;
+        if (c.x === 0 && c.y === 0) {
+          c.x = tx;
+          c.y = ty;
+        }
+        c.x += (tx - c.x) * Math.min(1, dt * 5);
+        c.y += (ty - c.y) * Math.min(1, dt * 5);
+      }
+
+      // hive links
+      ctx.lineWidth = 0.7;
+      const linkD = R * 0.38;
+      for (let i = 0; i < creatures.length; i++) {
+        for (let j = i + 1; j < creatures.length; j++) {
+          const a = creatures[i];
+          const b = creatures[j];
+          const d = Math.hypot(a.x - b.x, a.y - b.y);
+          if (d < linkD) {
+            ctx.strokeStyle = rgba((1 - d / linkD) * (0.12 + energy * 0.25), 30);
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+          }
+        }
+      }
+
+      // creatures: little glowing blobs with eyes that look at you
+      ctx.globalCompositeOperation = "source-over";
+      for (const c of creatures) {
+        const s = unit * 7 * c.size * (1 + energy * 0.35);
+        const squish = 1 + Math.sin(t * 4 + c.phase) * 0.06;
+        const glow = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, s * 2.6);
+        glow.addColorStop(0, rgba(0.45));
+        glow.addColorStop(1, rgba(0));
+        ctx.globalCompositeOperation = "lighter";
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, s * 2.6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalCompositeOperation = "source-over";
+        const r0 = Math.min(255, color[0] + c.tint);
+        const g0 = Math.min(255, Math.max(0, color[1] + c.tint * 0.5));
+        ctx.fillStyle = `rgba(${r0},${g0},${color[2]},0.95)`;
+        ctx.beginPath();
+        ctx.ellipse(c.x, c.y, s * squish, s / squish, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // eyes
+        if (now > c.blinkAt + 160) c.blinkAt = now + 2500 + Math.random() * 7000;
+        const blinking = now > c.blinkAt;
+        const eh = blinking ? s * 0.05 : s * 0.22;
+        const look = st === "listening" ? 0.25 : 0.12; // lean towards the viewer
+        ctx.fillStyle = "rgba(20,10,25,0.9)";
+        for (const side of [-1, 1]) {
+          ctx.beginPath();
+          ctx.ellipse(c.x + side * s * 0.36, c.y - s * 0.05 + s * look, s * 0.14, eh, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      ctx.globalCompositeOperation = "lighter";
+    };
+
     const frame = (now: number) => {
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
       const t = now / 1000;
       const st = stateRef.current;
-      const target = PALETTE[st];
+      const throng = variantRef.current === "throng";
+      const target = (throng ? THRONG_PALETTE : PALETTE)[st];
       for (let i = 0; i < 3; i++) color[i] += (target[i] - color[i]) * Math.min(1, dt * 4);
 
       const raw = Math.max(0, Math.min(1, levelRef.current ?? 0));
@@ -107,6 +228,12 @@ export default function Orb({
       ctx.beginPath();
       ctx.arc(cx, cy, haloR, 0, Math.PI * 2);
       ctx.fill();
+
+      if (throng) {
+        drawThrong(now, t, dt, cx, cy, R, st);
+        raf = requestAnimationFrame(frame);
+        return;
+      }
 
       // Particles (pseudo-3D sphere shell)
       const pr = R * (1.25 + energy * 0.5);

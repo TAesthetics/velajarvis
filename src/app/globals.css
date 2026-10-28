@@ -36,3 +36,11 @@ body {
   0%, 100% { opacity: 0.6; }
   50% { opacity: 0.35; }
 }
+
+/* Throng mode: warm, organic palette for the HUD chrome (orb draws its own colours) */
+.throng .hud {
+  filter: hue-rotate(-155deg) saturate(1.15);
+}
+.throng {
+  background: #0a0604 !important;
+}
