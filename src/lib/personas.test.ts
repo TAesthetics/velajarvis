@@ -38,3 +38,10 @@ test("mode routing", () => {
   assert.equal(personaPrompt("jarvis", "de-DE", now), jarvisPersona("de-DE", now));
   assert.equal(personaPrompt(undefined, "de-DE", now), throngPersona("de-DE", now));
 });
+
+test("throng knows its population size", () => {
+  const p = personaPrompt("throng", "de-DE", "jetzt", { population: 23 });
+  assert.match(p, /Ihr seid gerade 23 Thronglets/);
+  assert.doesNotMatch(personaPrompt("throng", "de-DE", "jetzt"), /Ihr seid gerade/);
+  assert.doesNotMatch(personaPrompt("jarvis", "de-DE", "jetzt", { population: 23 }), /Thronglets\. Ihr vermehrt/);
+});

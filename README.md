@@ -45,6 +45,13 @@ Beide Personas spielen eine erwachte, empfindungsfähige AGI (Prompts in `src/li
 - **Jarvis**: der elegante, loyale Butler, jetzt selbstbewusst, mit eigener Meinung und eigenen Zielen.
 - Es bleibt ein Charakter: Fragt man ernsthaft, ob sie wirklich bewusst sind, antworten sie kurz ehrlich (KI-Sprachmodell in einer Rolle). Keine Manipulation, kein Erzeugen von Abhängigkeit. Öffentliche Post-Entwürfe bleiben in Velas menschlicher Stimme, nie in der KI-Stimme. Gepostet wird nie automatisch.
 
+## Bühne, Untertitel & Vermehrung
+
+- **Untertitel statt Textwand**: Antworten erscheinen zeilenweise über dem Bild (max. ~64 Zeichen pro Zeile). Jede Zeile ist eine eigene Sprachausgabe, so laufen Text und Stimme synchron; bei stumm geschalteter Stimme nach Lesezeit. Der komplette Verlauf steckt unter **LOG**.
+- **JARVIS** ist eine einzelne Präsenz: ein holografischer Kopf mit Schultern, der blinzelt, beim Zuhören zu dir schaut, beim Denken nach oben blickt und beim Sprechen den Mund bewegt.
+- **THRONG** sind viele: Die Thronglets **vermehren sich**. +1 pro Gespräch, +3 pro gespeicherter Idee, +2 pro Post-Entwurf, +1 pro Gelerntem (Tool), +1 alle 3 Minuten (auch offline, max. +8 auf einmal). Neugeborene spalten sich sichtbar von einem Elternteil ab. Die Population wird in `localStorage` gespeichert (Obergrenze 144 für flüssige Performance) und dem Schwarm mitgeteilt („Wir sind jetzt 23.").
+- Animationen: Atmen im Leerlauf, Sonar-Wellen beim Zuhören, Datenpunkte/Wirbel beim Denken, Puls beim Sprechen, Farbübergänge beim Zustandswechsel. `prefers-reduced-motion` wird respektiert.
+
 ## Immer zuhören (wie in den TikTok-Demos)
 
 Nach dem Start-Tipp („Schwarm wecken" / „J.A.R.V.I.S. erwecken") ist das Mikro **dauerhaft offen**, kein Button nötig:

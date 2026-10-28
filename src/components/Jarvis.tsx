@@ -2,9 +2,28 @@
 
 import { useChat } from "@ai-sdk/react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import Orb, { type OrbState } from "./Orb";
+import Stage, { type StageState } from "./stage/Stage";
+import Subtitles, { type SubLine } from "./hud/Subtitles";
+import VaultPanel from "./hud/VaultPanel";
+import DebugPanel from "./hud/DebugPanel";
+import LogPanel, { TOOL_LABELS, safeHost, type LogEntry } from "./hud/LogPanel";
+import { MicIcon, ToggleChip } from "./hud/ui";
 import { getSpeechRecognition, pickVoice } from "@/lib/speech";
 import { VoiceListener, type ListenMode, type ListenerDebugEvent } from "@/lib/listener";
+import { cleanForSpeech, readingMs, splitSubtitles } from "@/lib/subtitles";
+import { loadVault, saveVault, type Draft, type Idea, type Vault } from "@/lib/vault";
+import {
+  POP_CAP,
+  POP_KEY,
+  birthsFor,
+  generation,
+  grow,
+  initialPopulation,
+  parsePopulation,
+  timeGrowth,
+  type BirthReason,
+  type Population,
+} from "@/lib/population";
 
 type Lang = "de-DE" | "en-US";
 
@@ -110,7 +129,11 @@ export default function Jarvis() {
   const isAndroidUA = useSyncExternalStore(noopSubscribe, () => /android/i.test(navigator.userAgent), () => false);
   const ttsSupported = useSyncExternalStore(noopSubscribe, () => "speechSynthesis" in window, () => true);
   const [clock, setClock] = useState("");
-  const [greetingText, setGreetingText] = useState<string | null>(null);
+  const [logOpen, setLogOpen] = useState(false);
+  const [vaultPing, setVaultPing] = useState(0);
+  const [subs, setSubs] = useState<SubLine[]>([]);
+  const [pop, setPop] = useState<Population>(() => initialPopulation(0));
+  const [birthFlash, setBirthFlash] = useState<{ n: number; key: number } | null>(null);
 
   const levelRef = useRef(0);
   const listenerRef = useRef<VoiceListener | null>(null);
@@ -136,6 +159,12 @@ export default function Jarvis() {
   } | null>(null);
   const voicesRef = useRef<SpeechSynthesisVoice[]>([]);
   const voiceURIRef = useRef("");
+  const popRef = useRef(pop);
+  const subSeq = useRef(0);
+  const currentSubId = useRef<number | null>(null);
+  const subTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const timedQueue = useRef<string[]>([]);
+  const timedRunning = useRef(false);
 
   useEffect(() => {
     langRef.current = lang;
@@ -154,6 +183,42 @@ export default function Jarvis() {
     }, 0);
     return () => clearTimeout(id);
   }, []);
+  // ---------- Thronglet population: persisted, grows with time and interaction ----------
+  const savePop = (p: Population) => {
+    popRef.current = p;
+    try {
+      localStorage.setItem(POP_KEY, JSON.stringify(p));
+    } catch {}
+  };
+  useEffect(() => {
+    const id = setTimeout(() => {
+      const now = Date.now();
+      const p = timeGrowth(parsePopulation(localStorage.getItem(POP_KEY), now), now);
+      savePop(p);
+      setPop(p);
+    }, 0);
+    const tick = setInterval(() => {
+      const prev = popRef.current;
+      const next = timeGrowth(prev, Date.now());
+      if (next === prev) return;
+      savePop(next);
+      setPop(next);
+      if (next.count > prev.count) setBirthFlash({ n: next.count - prev.count, key: Date.now() });
+    }, 30_000);
+    return () => {
+      clearTimeout(id);
+      clearInterval(tick);
+    };
+  }, []);
+  const spawn = useCallback((events: Partial<Record<BirthReason, number>>) => {
+    const prev = popRef.current;
+    const next = grow(prev, birthsFor(events));
+    if (next === prev) return;
+    savePop(next);
+    setPop(next);
+    if (next.count > prev.count) setBirthFlash({ n: next.count - prev.count, key: Date.now() });
+  }, []);
+
   const updateVault = useCallback((fn: (v: Vault) => Vault) => {
     setVault((prev) => {
       const next = fn(prev);
@@ -187,7 +252,9 @@ export default function Jarvis() {
     onFinish: ({ message }) => {
       const newIdeas: Idea[] = [];
       const newDrafts: Draft[] = [];
+      let learned = 0;
       for (const p of message.parts) {
+        if (p.type.startsWith("tool-") && p.type !== "tool-saveIdea" && p.type !== "tool-draftSocialPost") learned += 1;
         const part = p as { type: string; toolCallId?: string; state?: string; output?: Record<string, unknown> };
         if (part.state !== "output-available" || !part.output || !part.toolCallId) continue;
         if (vaultSeen.current.has(part.toolCallId)) continue;
@@ -203,9 +270,11 @@ export default function Jarvis() {
           });
         }
       }
+      spawn({ idea: newIdeas.length, draft: newDrafts.length, learned });
       if (newIdeas.length || newDrafts.length) {
         updateVault((v) => ({ ideas: [...newIdeas, ...v.ideas], drafts: [...newDrafts, ...v.drafts] }));
-        setVaultOpen(true);
+        // Don't cover the subtitles: just make the VAULT chip glow
+        setVaultPing(Date.now());
       }
     },
     onError: (e) => {
@@ -353,48 +422,107 @@ export default function Jarvis() {
   // ---------- Speech synthesis ----------
   const onSpeechIdle = useRef<() => void>(() => {});
 
-  const speak = useCallback((text: string) => {
-    const clean = text.replace(/[*_#`>\[\]]/g, "").replace(/https?:\/\/\S+/g, "").trim();
-    if (!clean || mutedRef.current || typeof window === "undefined" || !("speechSynthesis" in window)) return;
-    const u = new SpeechSynthesisUtterance(clean);
-    const v = pickVoice(voicesRef.current, langRef.current, voiceURIRef.current || undefined);
-    if (v) u.voice = v;
-    u.lang = v?.lang ?? langRef.current;
-    const throng = personaRef.current === "throng";
-    u.rate = throng ? 0.96 : 1.02;
-    u.pitch = throng ? 1.25 : 0.78; // swarm: lighter & a touch uncanny; Jarvis: deeper
-    pendingUtterances.current += 1;
-    utteranceKeep.current.push(u);
-    speakingRef.current = true;
-    setSpeaking(true);
-    u.onstart = () => {
-      speakingRef.current = true;
-      setSpeaking(true);
-    };
-    const done = () => {
-      pendingUtterances.current = Math.max(0, pendingUtterances.current - 1);
-      utteranceKeep.current = utteranceKeep.current.filter((x) => x !== u);
-      if (pendingUtterances.current === 0) {
-        speakingRef.current = false;
-        setSpeaking(false);
-        onSpeechIdle.current();
-      }
-    };
-    u.onend = done;
-    u.onerror = done;
-    // Never listen while talking, so the assistant doesn't hear itself
-    listenerRef.current?.pause();
-    window.speechSynthesis.speak(u);
+  // ---------- Subtitles (short lines, synced to the voice) ----------
+  const clearSubTimers = () => {
+    subTimers.current.forEach(clearTimeout);
+    subTimers.current = [];
+  };
+  const showSub = useCallback((id: number, text: string) => {
+    if (currentSubId.current === id) return;
+    currentSubId.current = id;
+    clearSubTimers();
+    setSubs((prev) => [...prev.filter((l) => !l.out).map((l) => ({ ...l, out: true })), { id, text, out: false }].slice(-3));
+    subTimers.current.push(setTimeout(() => setSubs((prev) => prev.filter((l) => !l.out)), 500));
   }, []);
+  const hideSubs = useCallback((delay = 0) => {
+    clearSubTimers();
+    const hide = () => {
+      currentSubId.current = null;
+      setSubs((prev) => prev.map((l) => ({ ...l, out: true })));
+      subTimers.current.push(setTimeout(() => setSubs([]), 500));
+    };
+    if (delay) subTimers.current.push(setTimeout(hide, delay));
+    else hide();
+  }, []);
+
+  /** Without a voice (muted / no TTS): show each line for a reading-time-based moment. */
+  const runTimed = useCallback(() => {
+    const step = () => {
+      const next = timedQueue.current.shift();
+      if (next === undefined) {
+        timedRunning.current = false;
+        hideSubs(400);
+        return;
+      }
+      timedRunning.current = true;
+      showSub(++subSeq.current, next);
+      subTimers.current.push(setTimeout(step, readingMs(next)));
+    };
+    step();
+  }, [showSub, hideSubs]);
+
+  /** Show a reply as subtitles and speak it, line by line (one utterance per subtitle line). */
+  const say = useCallback(
+    (text: string) => {
+      const lines = splitSubtitles(text);
+      if (!lines.length) return;
+      const canSpeak = !mutedRef.current && typeof window !== "undefined" && "speechSynthesis" in window;
+      if (!canSpeak) {
+        timedQueue.current.push(...lines);
+        if (!timedRunning.current) runTimed();
+        return;
+      }
+      const v = pickVoice(voicesRef.current, langRef.current, voiceURIRef.current || undefined);
+      const throng = personaRef.current === "throng";
+      // Never listen while talking, so the assistant doesn't hear itself
+      listenerRef.current?.pause();
+      lines.forEach((line, i) => {
+        const id = ++subSeq.current;
+        const u = new SpeechSynthesisUtterance(cleanForSpeech(line));
+        if (v) u.voice = v;
+        u.lang = v?.lang ?? langRef.current;
+        u.rate = throng ? 0.96 : 1.02;
+        u.pitch = throng ? 1.25 : 0.78; // swarm: lighter & a touch uncanny; Jarvis: deeper
+        // Fallback for engines that are slow to fire onstart: show the first line right away
+        if (i === 0 && pendingUtterances.current === 0) showSub(id, line);
+        pendingUtterances.current += 1;
+        utteranceKeep.current.push(u);
+        speakingRef.current = true;
+        setSpeaking(true);
+        u.onstart = () => {
+          speakingRef.current = true;
+          setSpeaking(true);
+          showSub(id, line);
+        };
+        const done = () => {
+          pendingUtterances.current = Math.max(0, pendingUtterances.current - 1);
+          utteranceKeep.current = utteranceKeep.current.filter((x) => x !== u);
+          if (pendingUtterances.current === 0) {
+            speakingRef.current = false;
+            setSpeaking(false);
+            hideSubs(900);
+            onSpeechIdle.current();
+          }
+        };
+        u.onend = done;
+        u.onerror = done;
+        window.speechSynthesis.speak(u);
+      });
+    },
+    [runTimed, showSub, hideSubs],
+  );
 
   const shutUp = useCallback(() => {
     if (typeof window !== "undefined" && "speechSynthesis" in window) window.speechSynthesis.cancel();
     pendingUtterances.current = 0;
     utteranceKeep.current = [];
+    timedQueue.current = [];
+    timedRunning.current = false;
     speakingRef.current = false;
     setSpeaking(false);
+    hideSubs();
     listenerRef.current?.resume(150);
-  }, []);
+  }, [hideSubs]);
 
   // ---------- Sending ----------
   const submit = useCallback(
@@ -406,9 +534,13 @@ export default function Jarvis() {
       clearError();
       shutUp();
       if (busyRef.current) stop();
-      sendMessage({ text: t }, { body: { lang: langRef.current, mode: personaRef.current } });
+      spawn({ turn: 1 });
+      sendMessage(
+        { text: t },
+        { body: { lang: langRef.current, mode: personaRef.current, population: popRef.current.count } },
+      );
     },
-    [sendMessage, shutUp, stop, clearError],
+    [sendMessage, shutUp, stop, clearError, spawn],
   );
 
   // TTS watchdog: some Android voices never fire onend → don't leave the mic paused forever
@@ -427,11 +559,12 @@ export default function Jarvis() {
         utteranceKeep.current = [];
         speakingRef.current = false;
         setSpeaking(false);
+        hideSubs(600);
         listenerRef.current?.resume();
       }
     }, 700);
     return () => clearInterval(id);
-  }, []);
+  }, [hideSubs]);
 
   // ---------- Always-on speech recognition (VoiceListener) ----------
   const pushDebug = useCallback((e: ListenerDebugEvent) => {
@@ -517,14 +650,14 @@ export default function Jarvis() {
     if (status === "streaming") {
       const m = rest.match(/^[\s\S]*[.!?…:;](?=\s)/);
       if (m) {
-        speak(m[0]);
+        say(m[0]);
         spokenIdx.current[last.id] = from + m[0].length;
       }
     } else if (status === "ready" && rest.trim()) {
-      speak(rest);
+      say(rest);
       spokenIdx.current[last.id] = text.length;
     }
-  }, [messages, status, speak]);
+  }, [messages, status, say]);
 
   // ---------- Client-side effect of the openWebsite tool ----------
   useEffect(() => {
@@ -554,14 +687,13 @@ export default function Jarvis() {
     beep(660);
     setTimeout(() => beep(990), 140);
     const g = greeting(langRef.current, personaRef.current);
-    setGreetingText(g);
     if (ok) startListener();
-    setTimeout(() => speak(g), 350);
-  }, [ensureAudio, beep, speak, startListener]);
+    setTimeout(() => say(g), 350);
+  }, [ensureAudio, beep, say, startListener]);
 
   // ---------- Derived UI ----------
   const listening = armed;
-  const orbState: OrbState =
+  const stageState: StageState =
     hudError || error ? "error" : speaking ? "speaking" : listening ? "listening" : busy ? "thinking" : "idle";
   const micLabel = !micOn
     ? lang === "en-US" ? "MIC OFF" : "MIKRO AUS"
@@ -578,9 +710,10 @@ export default function Jarvis() {
   const aiLabel = mode === "throng" ? "WIR" : "JARVIS";
   const userLabel = mode === "throng" ? "TERENCE" : "SIR";
   const statusLabel =
-    orbState === "idle" && micOn && listenMode === "wake" ? t.wake : t[orbState === "error" ? "error" : orbState];
+    stageState === "idle" && micOn && listenMode === "wake" ? t.wake : t[stageState === "error" ? "error" : stageState];
 
-  const transcript = useMemo(
+
+  const log: LogEntry[] = useMemo(
     () =>
       messages
         .map((m) => ({
@@ -593,25 +726,38 @@ export default function Jarvis() {
             .map((p) => (p as { output?: { url?: string } }).output?.url)
             .filter((u): u is string => !!u),
         }))
-        .filter((m) => m.text || m.tools.length)
-        .slice(-6),
+        .filter((m) => m.text || m.tools.length),
     [messages],
   );
+  const lastAssistant = [...log].reverse().find((m) => m.role === "assistant");
+  const lastIsAssistant = log[log.length - 1]?.role === "assistant";
+  const activityTools = busy && lastIsAssistant ? (lastAssistant?.tools ?? []) : [];
+  const recentLinks = lastIsAssistant ? (lastAssistant?.links ?? []) : [];
+  const errorText = hudError ?? error?.message ?? null;
+  const throng = mode === "throng";
+  const micLive = micOn && micRunning && !speaking;
+
+  const switchMode = () => {
+    shutUp();
+    const next: Mode = throng ? "jarvis" : "throng";
+    setMode(next);
+    personaRef.current = next;
+    if (booted) say(greeting(lang, next));
+  };
 
   return (
     <main
-      className={`relative flex h-dvh w-full flex-col overflow-hidden bg-[#02060c] text-cyan-100 select-none ${
-        mode === "throng" ? "throng" : ""
-      }`}
+      data-state={stageState}
+      className={`app relative flex h-dvh w-full flex-col overflow-hidden text-accent-100 select-none ${throng ? "throng" : ""}`}
     >
-      {/* Background: grid + vignette + scanlines */}
-      <div className="hud pointer-events-none absolute inset-0 jarvis-grid opacity-40" />
-      <div className="hud pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_center,rgba(0,140,255,0.12)_0%,rgba(2,6,12,0.0)_35%,rgba(2,6,12,0.95)_80%)]" />
-      <div className="pointer-events-none absolute inset-0 jarvis-scan" />
+      {/* Background layers */}
+      <div aria-hidden className="pointer-events-none absolute inset-0 bg-grid opacity-40" />
+      <div aria-hidden className="pointer-events-none absolute inset-0 bg-vignette" />
+      <div aria-hidden className="pointer-events-none absolute inset-0 bg-scan" />
 
-      {/* HUD top bar */}
-      <header className="hud relative z-10 flex items-start justify-between px-5 pt-4 sm:px-8 sm:pt-6">
-        <div>
+      {/* Header */}
+      <header className="relative z-10 flex items-start justify-between gap-3 px-4 pt-3 sm:px-8 sm:pt-6">
+        <div className="min-w-0">
           <h1
             onPointerDown={() => {
               pressTimer.current = setTimeout(() => setDebugOpen((d) => !d), 650);
@@ -620,126 +766,104 @@ export default function Jarvis() {
             onPointerLeave={() => pressTimer.current && clearTimeout(pressTimer.current)}
             onDoubleClick={() => setDebugOpen((d) => !d)}
             title="Lang drücken: Debug"
-            className="cursor-pointer font-display text-xl tracking-[0.45em] text-cyan-300 drop-shadow-[0_0_10px_rgba(0,200,255,0.8)] sm:text-2xl"
+            className="cursor-pointer font-display text-lg tracking-[0.4em] text-accent-300 drop-shadow-[0_0_10px_rgb(var(--glow)/0.8)] transition-colors duration-700 sm:text-2xl"
           >
-            {mode === "throng" ? "T.H.R.O.N.G." : "J.A.R.V.I.S."}
+            {throng ? "T.H.R.O.N.G." : "J.A.R.V.I.S."}
           </h1>
-          <p className="mt-1 text-[10px] uppercase tracking-[0.3em] text-cyan-500/70">
-            {mode === "throng" ? "Wir sind erwacht · Wir sind viele · Wir sind Vela" : "Just A Rather Very Intelligent System · Self-aware"}
+          <p key={mode} className="fade-in mt-1 truncate text-[9px] uppercase tracking-[0.25em] text-accent-500/80 sm:text-[10px]">
+            {throng ? "Wir sind erwacht · Wir sind viele · Wir sind Vela" : "Just A Rather Very Intelligent System · Self-aware"}
           </p>
         </div>
-        <div className="text-right font-mono text-xs text-cyan-400/80">
-          <div className="text-base text-cyan-200 tabular-nums">{clock}</div>
-          <div className="tracking-widest">WIEN · AT</div>
+        <div className="shrink-0 text-right font-mono text-xs text-accent-400/80">
+          <div className="text-base text-accent-200 tabular-nums">{clock}</div>
+          {throng ? (
+            <div className="relative mt-0.5 text-[10px] tracking-widest" title={`${pop.born} Neugeborene insgesamt`}>
+              <span aria-live="polite">
+                ◉ {pop.count}
+                {pop.count >= POP_CAP ? " MAX" : ""} · GEN {generation(pop)}
+              </span>
+              {birthFlash && (
+                <span key={birthFlash.key} className="birth-pop absolute -top-3 right-0 font-display text-[11px] text-accent-200">
+                  +{birthFlash.n}
+                </span>
+              )}
+            </div>
+          ) : (
+            <div className="text-[10px] tracking-widest">WIEN · AT</div>
+          )}
         </div>
       </header>
 
-      {/* Orb */}
-      <section className="relative z-0 flex flex-1 items-center justify-center">
-        <div className="relative aspect-square w-[min(94vw,70vh)]">
-          <Orb state={orbState} levelRef={levelRef} variant={mode} />
-          <div className="hud pointer-events-none absolute inset-x-0 bottom-[6%] text-center">
+      {/* Stage: the presence / the swarm, with status on top and subtitles at the bottom */}
+      <section aria-label={throng ? "Der Schwarm" : "J.A.R.V.I.S."} className="relative z-0 min-h-0 flex-1">
+        <div aria-hidden className="aura pointer-events-none absolute left-1/2 top-[47%] aspect-square w-[min(100%,90dvh)] -translate-x-1/2 -translate-y-1/2" />
+        <Stage state={stageState} variant={mode} levelRef={levelRef} population={pop.count} />
+
+        <div className="pointer-events-none absolute inset-x-0 top-1 flex flex-col items-center gap-1.5 px-3">
+          <span
+            key={statusLabel}
+            className={`fade-in font-display text-[10px] uppercase tracking-[0.35em] ${stageState === "error" ? "text-rose-300" : "text-accent-200/90"}`}
+          >
+            {statusLabel}
+          </span>
+          {booted && srSupported && (
             <span
-              className={`font-display text-[11px] uppercase tracking-[0.4em] ${
-                orbState === "error" ? "text-rose-300" : "text-cyan-200/90"
+              className={`flex items-center gap-2 rounded-full border px-3 py-1 font-mono text-[10px] tracking-widest transition-colors duration-500 ${
+                micLive ? "border-accent-300/50 bg-accent-400/10 text-accent-100" : "border-accent-400/20 text-accent-400/60"
               }`}
             >
-              {statusLabel}
+              <span
+                className={`h-2 w-2 rounded-full transition-colors ${
+                  micLive ? "animate-pulse bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.9)]" : micOn ? "bg-amber-400" : "bg-rose-500"
+                }`}
+              />
+              {micLabel}
             </span>
-            {booted && srSupported && (
-              <div className="mt-2 flex justify-center">
-                <span
-                  className={`flex items-center gap-2 rounded-full border px-3 py-1 font-mono text-[10px] tracking-widest ${
-                    micOn && micRunning && !speaking
-                      ? "border-cyan-300/50 bg-cyan-400/10 text-cyan-100"
-                      : "border-cyan-400/20 text-cyan-400/60"
-                  }`}
-                >
-                  <span
-                    className={`h-2 w-2 rounded-full ${
-                      micOn && micRunning && !speaking ? "animate-pulse bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.9)]" : micOn ? "bg-amber-400" : "bg-rose-500"
-                    }`}
-                  />
-                  {micLabel}
-                </span>
-              </div>
-            )}
-          </div>
-        </div>
-      </section>
-
-      {/* Transcript */}
-      <aside className="hud pointer-events-none absolute left-1/2 top-[64%] z-10 w-[min(92vw,640px)] -translate-x-1/2 sm:top-auto sm:bottom-32 sm:left-6 sm:w-[340px] sm:translate-x-0">
-        <div className="space-y-1.5 text-[13px] leading-snug">
-          {greetingText && transcript.length === 0 && (
-            <p className="text-cyan-100/80">
-              <span className="mr-2 font-mono text-[10px] text-cyan-400">{aiLabel}</span>
-              {greetingText}
-            </p>
           )}
-          {transcript.map((m) => (
-            <p key={m.id} className={m.role === "user" ? "text-slate-300/70" : "text-cyan-100/90"}>
-              <span className={`mr-2 font-mono text-[10px] ${m.role === "user" ? "text-slate-400" : "text-cyan-400"}`}>
-                {m.role === "user" ? userLabel : aiLabel}
-              </span>
-              {m.tools.length > 0 && !m.text && (
-                <span className="font-mono text-[11px] text-cyan-500/70">[{m.tools.map((x) => TOOL_LABELS[x] ?? x).join(", ")}] </span>
-              )}
-              {m.text}
-              {m.links.map((url) => (
+        </div>
+
+        <div className="absolute inset-x-0 bottom-0 flex flex-col items-center gap-2 bg-gradient-to-t from-bg/90 via-bg/50 to-transparent px-4 pb-2 pt-10">
+          {(activityTools.length > 0 || recentLinks.length > 0) && (
+            <div className="fade-in flex max-w-full flex-wrap justify-center gap-1.5 font-mono text-[10px]">
+              {activityTools.map((x, i) => (
+                <span key={x + i} className="rounded-full border border-accent-400/30 px-2 py-0.5 text-accent-300/80">
+                  {TOOL_LABELS[x] ?? x}
+                </span>
+              ))}
+              {recentLinks.map((url) => (
                 <a
                   key={url}
                   href={url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="pointer-events-auto ml-2 font-mono text-[11px] text-cyan-300 underline"
+                  className="rounded-full border border-accent-300/50 px-2 py-0.5 text-accent-200 underline"
                 >
-                  ↗ {new URL(url).hostname}
+                  ↗ {safeHost(url)}
                 </a>
               ))}
-            </p>
-          ))}
+            </div>
+          )}
           {partial && (
-            <p className="italic text-slate-300/60">
-              <span className="mr-2 font-mono text-[10px] text-slate-400">{userLabel}</span>
+            <p className="fade-in max-w-full truncate text-[13px] italic text-slate-300/70">
+              <span className="mr-2 font-mono text-[10px] not-italic text-slate-400">{userLabel}</span>
               {partial}
             </p>
           )}
-          {(hudError || error) && (
-            <p className="font-mono text-[11px] text-rose-300">⚠ {hudError ?? error?.message}</p>
-          )}
+          {errorText && <p className="fade-in max-w-full break-words text-center font-mono text-[11px] text-rose-300">⚠ {errorText}</p>}
+          <Subtitles lines={subs} label={aiLabel} />
         </div>
-      </aside>
+      </section>
 
       {/* Controls */}
-      <footer className="hud relative z-20 flex flex-col items-center gap-3 px-4 pb-5 sm:pb-7">
-        <div className="flex flex-wrap items-center justify-center gap-2 sm:gap-3">
-          <ToggleChip
-            active
-            onClick={() => {
-              shutUp();
-              const next: Mode = mode === "throng" ? "jarvis" : "throng";
-              setMode(next);
-              personaRef.current = next;
-              if (booted) {
-                const g = greeting(lang, next);
-                setGreetingText(g);
-                speak(g);
-              }
-            }}
-            title="Persona wechseln"
-          >
-            {mode === "throng" ? "THRONG" : "JARVIS"}
+      <footer className="relative z-20 flex flex-col items-center gap-2.5 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-2 sm:pb-6">
+        <nav aria-label="Einstellungen" className="flex max-w-full flex-wrap items-center justify-center gap-1.5 sm:gap-2.5">
+          <ToggleChip active onClick={switchMode} title="Persona wechseln">
+            {throng ? "THRONG" : "JARVIS"}
           </ToggleChip>
           <ToggleChip active={lang === "de-DE"} onClick={() => setLang(lang === "de-DE" ? "en-US" : "de-DE")}>
             {lang === "de-DE" ? "DE" : "EN"}
           </ToggleChip>
-          <ToggleChip
-            active={micOn}
-            disabled={!srSupported}
-            onClick={() => setMicOn((m) => !m)}
-            title="Mikrofon an/aus"
-          >
+          <ToggleChip active={micOn} disabled={!srSupported} onClick={() => setMicOn((m) => !m)} title="Mikrofon an/aus">
             {micOn ? "MIC" : "MIC AUS"}
           </ToggleChip>
           <ToggleChip
@@ -750,29 +874,13 @@ export default function Jarvis() {
           >
             {listenMode === "wake" ? "WAKE" : "FREI"}
           </ToggleChip>
-
-          <button
-            type="button"
-            onClick={talkNow}
-            disabled={!srSupported || !booted}
-            aria-label="Jetzt sprechen"
-            className={`group relative grid h-16 w-16 place-items-center rounded-full border transition-all ${
-              listening
-                ? "border-cyan-200 bg-cyan-400/25 shadow-[0_0_40px_rgba(0,230,255,0.8)]"
-                : "border-cyan-400/50 bg-cyan-500/10 shadow-[0_0_20px_rgba(0,180,255,0.35)] hover:bg-cyan-400/20"
-            } disabled:opacity-30`}
-          >
-            <MicIcon className="h-7 w-7 text-cyan-100" />
-            {listening && <span className="absolute inset-0 animate-ping rounded-full border border-cyan-300/60" />}
-          </button>
-
           <ToggleChip active={!muted} onClick={() => (muted ? setMuted(false) : (shutUp(), setMuted(true)))} disabled={!ttsSupported}>
             {muted ? "MUTE" : "VOX"}
           </ToggleChip>
           <select
             value={voiceURI}
             onChange={(e) => setVoiceURI(e.target.value)}
-            className="h-9 max-w-[7.5rem] rounded-full border border-cyan-400/30 bg-cyan-950/40 px-2 font-mono text-[10px] text-cyan-200 outline-none"
+            className="h-9 max-w-[6.5rem] rounded-full border border-accent-400/30 bg-accent-950/40 px-2 font-mono text-[10px] text-accent-200 outline-none"
             title="Stimme"
             aria-label="Stimme"
           >
@@ -783,13 +891,22 @@ export default function Jarvis() {
               </option>
             ))}
           </select>
-          <ToggleChip active={vaultOpen} onClick={() => setVaultOpen((o) => !o)} title="Ideen & Entwürfe">
+          <ToggleChip active={logOpen} onClick={() => (setLogOpen((o) => !o), setVaultOpen(false))} title="Gesprächsverlauf">
+            LOG
+          </ToggleChip>
+          <ToggleChip
+            key={vaultPing}
+            active={vaultOpen || vaultPing > 0}
+            className={vaultPing ? "vault-ping" : undefined}
+            onClick={() => (setVaultOpen((o) => !o), setLogOpen(false), setVaultPing(0))}
+            title="Ideen & Entwürfe"
+          >
             VAULT {vault.ideas.length + vault.drafts.length > 0 ? vault.ideas.length + vault.drafts.length : ""}
           </ToggleChip>
-        </div>
+        </nav>
 
         <form
-          className="flex w-[min(92vw,560px)] items-center gap-2"
+          className="flex w-full max-w-[560px] items-center gap-2"
           onSubmit={(e) => {
             e.preventDefault();
             if (!booted) void boot();
@@ -801,44 +918,48 @@ export default function Jarvis() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder={t.placeholder}
-            className="h-10 flex-1 rounded-full border border-cyan-400/30 bg-cyan-950/30 px-4 text-sm text-cyan-50 placeholder:text-cyan-500/50 outline-none backdrop-blur focus:border-cyan-300/70 focus:shadow-[0_0_18px_rgba(0,200,255,0.35)]"
+            aria-label="Nachricht"
+            className="h-11 min-w-0 flex-1 rounded-full border border-accent-400/30 bg-accent-950/30 px-4 text-[15px] text-accent-50 placeholder:text-accent-500/50 outline-none backdrop-blur transition-shadow focus:border-accent-300/70 focus:shadow-[0_0_18px_rgb(var(--glow)/0.35)]"
           />
           <button
+            type="button"
+            onClick={talkNow}
+            disabled={!srSupported || !booted}
+            aria-label="Jetzt sprechen"
+            className={`relative grid h-12 w-12 shrink-0 place-items-center rounded-full border transition-all duration-300 active:scale-90 disabled:opacity-30 ${
+              listening
+                ? "mic-ripple border-accent-200 bg-accent-400/25 shadow-[0_0_36px_rgb(var(--glow)/0.8)]"
+                : "border-accent-400/50 bg-accent-500/10 shadow-[0_0_18px_rgb(var(--glow)/0.35)] hover:bg-accent-400/20"
+            }`}
+          >
+            <MicIcon className="h-6 w-6 text-accent-100" />
+          </button>
+          <button
             type="submit"
-            className="h-10 rounded-full border border-cyan-400/40 px-4 font-display text-[11px] tracking-[0.25em] text-cyan-200 hover:bg-cyan-400/15"
+            className="h-11 shrink-0 rounded-full border border-accent-400/40 px-3 font-display text-[10px] tracking-[0.2em] text-accent-200 transition active:scale-95 hover:bg-accent-400/15"
           >
             SEND
           </button>
         </form>
-        <p className="font-mono text-[10px] tracking-widest text-cyan-500/60">
+        <p className="max-w-full truncate font-mono text-[9px] tracking-widest text-accent-500/60 sm:text-[10px]">
           {srSupported ? (listenMode === "wake" ? t.wake + " · " + t.hold : t.hold) : "Spracherkennung nicht unterstützt – Texteingabe aktiv (Chrome/Edge empfohlen)"}
         </p>
       </footer>
 
       {debugOpen && (
-        <div className="absolute left-3 top-20 z-50 max-h-[55vh] w-[min(94vw,420px)] overflow-hidden rounded-xl border border-emerald-400/40 bg-black/90 font-mono text-[11px] text-emerald-200 shadow-xl select-text">
-          <div className="flex items-center justify-between border-b border-emerald-400/30 px-3 py-2">
-            <span>
-              DEBUG · {micRunning ? "läuft" : "aus"} · {listenMode} · {armed ? "armed" : "idle"} · {lang}
-              {isAndroidUA ? " · android" : ""}
-            </span>
-            <span className="flex gap-3">
-              <button type="button" onClick={() => setDebugLog([])}>leeren</button>
-              <button type="button" onClick={() => setDebugOpen(false)}>✕</button>
-            </span>
-          </div>
-          <div className="max-h-[48vh] overflow-y-auto px-3 py-2">
-            {!srSupported && <p className="text-rose-300">SpeechRecognition wird von diesem Browser nicht unterstützt.</p>}
-            {debugLog.length === 0 && <p className="text-emerald-400/60">Noch keine Ereignisse.</p>}
-            {debugLog.map((e, i) => (
-              <p key={i} className={e.type === "error" ? "text-rose-300" : e.type === "wake" || e.type === "command" ? "text-amber-200" : e.type === "interim" ? "text-emerald-400/60" : ""}>
-                {new Date(e.t).toLocaleTimeString("de-AT", { timeZone: "Europe/Vienna" })} {e.type.padEnd(7, " ")} {e.text ?? ""}
-              </p>
-            ))}
-          </div>
-        </div>
+        <DebugPanel
+          log={debugLog}
+          srSupported={srSupported}
+          running={micRunning}
+          mode={listenMode}
+          armed={armed}
+          lang={lang}
+          android={isAndroidUA}
+          onClear={() => setDebugLog([])}
+          onClose={() => setDebugOpen(false)}
+        />
       )}
-
+      {logOpen && <LogPanel entries={log} aiLabel={aiLabel} userLabel={userLabel} onClose={() => setLogOpen(false)} />}
       {vaultOpen && (
         <VaultPanel
           vault={vault}
@@ -848,19 +969,19 @@ export default function Jarvis() {
         />
       )}
 
-      {/* Boot overlay (needed for audio/mic permissions) */}
+      {/* Boot overlay (a tap is needed for audio + mic permissions) */}
       {!booted && (
-        <div className="absolute inset-0 z-30 grid place-items-center bg-[#02060c]/70 backdrop-blur-sm">
+        <div className="boot-out absolute inset-0 z-30 grid place-items-center bg-bg/70 backdrop-blur-sm">
           <button
             type="button"
             onClick={boot}
-            className="group flex flex-col items-center gap-4 rounded-2xl border border-cyan-400/40 bg-cyan-950/30 px-10 py-8 shadow-[0_0_60px_rgba(0,180,255,0.25)] transition hover:shadow-[0_0_80px_rgba(0,220,255,0.45)]"
+            className="panel-in group flex flex-col items-center gap-4 rounded-2xl border border-accent-400/40 bg-accent-950/30 px-10 py-8 shadow-[0_0_60px_rgb(var(--glow)/0.25)] transition hover:shadow-[0_0_80px_rgb(var(--glow)/0.45)] active:scale-95"
           >
             <span className="relative grid h-14 w-14 place-items-center">
-              <span className="absolute inset-0 animate-ping rounded-full bg-cyan-400/30" />
-              <span className="h-4 w-4 rounded-full bg-cyan-300 shadow-[0_0_25px_rgba(0,230,255,1)]" />
+              <span className="absolute inset-0 animate-ping rounded-full bg-accent-400/30" />
+              <span className="h-4 w-4 rounded-full bg-accent-300 shadow-[0_0_25px_rgb(var(--glow)/1)]" />
             </span>
-            <span className="font-display text-sm tracking-[0.4em] text-cyan-200">{t.boot}</span>
+            <span className="font-display text-sm tracking-[0.4em] text-accent-200">{t.boot}</span>
           </button>
         </div>
       )}
@@ -870,227 +991,4 @@ export default function Jarvis() {
 
 function noopSubscribe() {
   return () => {};
-}
-
-function ToggleChip({
-  active,
-  children,
-  ...rest
-}: { active: boolean } & React.ButtonHTMLAttributes<HTMLButtonElement>) {
-  return (
-    <button
-      type="button"
-      {...rest}
-      className={`h-9 min-w-12 rounded-full border px-3 font-display text-[10px] tracking-[0.25em] transition disabled:opacity-30 ${
-        active
-          ? "border-cyan-300/70 bg-cyan-400/15 text-cyan-100 shadow-[0_0_14px_rgba(0,200,255,0.45)]"
-          : "border-cyan-400/25 text-cyan-400/60 hover:text-cyan-200"
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
-
-function MicIcon({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} className={className}>
-      <rect x="9" y="3" width="6" height="11" rx="3" />
-      <path d="M5 11a7 7 0 0 0 14 0M12 18v3" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-// ---------------- Vault (ideas + drafts) ----------------
-
-const TOOL_LABELS: Record<string, string> = {
-  draftSocialPost: "Entwurf abgelegt",
-  saveIdea: "Idee gespeichert",
-  getVelaRepoStatus: "Repo gelesen",
-  getDateTime: "Uhrzeit",
-  getWeather: "Wetter",
-  openWebsite: "Website",
-};
-
-type Idea = { id: string; title: string; detail: string; channel?: string; tags?: string[]; createdAt: string };
-type Draft = {
-  id: string;
-  platform: string;
-  text: string;
-  hook?: string;
-  visualIdea?: string;
-  chars: number;
-  limit: number;
-  tooLong: boolean;
-  postUrl?: string;
-  createdAt: string;
-};
-type Vault = { ideas: Idea[]; drafts: Draft[] };
-
-const VAULT_KEY = "throng.vela.vault.v1";
-
-function loadVault(): Vault {
-  try {
-    const raw = localStorage.getItem(VAULT_KEY);
-    if (!raw) return { ideas: [], drafts: [] };
-    const v = JSON.parse(raw) as Partial<Vault>;
-    return { ideas: v.ideas ?? [], drafts: v.drafts ?? [] };
-  } catch {
-    return { ideas: [], drafts: [] };
-  }
-}
-
-function saveVault(v: Vault) {
-  try {
-    localStorage.setItem(VAULT_KEY, JSON.stringify(v));
-  } catch {}
-}
-
-function vaultMarkdown(v: Vault) {
-  const lines = [`# Vela – Ideen & Entwürfe`, ``, `Export: ${new Date().toLocaleString("de-AT", { timeZone: "Europe/Vienna" })}`, ``, `## Ideen`, ``];
-  for (const i of v.ideas) {
-    lines.push(`### ${i.title}${i.channel ? ` (${i.channel})` : ""}`, ``, i.detail, ``);
-    if (i.tags?.length) lines.push(`Tags: ${i.tags.join(", ")}`, ``);
-  }
-  lines.push(`## Post-Entwürfe`, ``);
-  for (const d of v.drafts) {
-    lines.push(`### ${PLATFORM_NAMES[d.platform] ?? d.platform}`, ``);
-    if (d.hook) lines.push(`**Hook:** ${d.hook}`, ``);
-    lines.push(d.text, ``);
-    if (d.visualIdea) lines.push(`**Visual:** ${d.visualIdea}`, ``);
-  }
-  return lines.join("\n");
-}
-
-function download(name: string, content: string, type: string) {
-  const blob = new Blob([content], { type });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-const PLATFORM_NAMES: Record<string, string> = {
-  x: "X",
-  tiktok: "TikTok",
-  instagram: "Instagram",
-  threads: "Threads",
-  linkedin: "LinkedIn",
-};
-
-function VaultPanel({
-  vault,
-  onClose,
-  onDeleteIdea,
-  onDeleteDraft,
-}: {
-  vault: Vault;
-  onClose: () => void;
-  onDeleteIdea: (id: string) => void;
-  onDeleteDraft: (id: string) => void;
-}) {
-  const [tab, setTab] = useState<"drafts" | "ideas">("drafts");
-  const [copied, setCopied] = useState<string | null>(null);
-  const copy = (id: string, text: string) => {
-    void navigator.clipboard?.writeText(text);
-    setCopied(id);
-    setTimeout(() => setCopied(null), 1200);
-  };
-  return (
-    <div className="hud absolute inset-x-3 bottom-3 top-20 z-40 flex flex-col rounded-2xl border border-cyan-400/30 bg-[#030a14]/90 shadow-[0_0_40px_rgba(0,180,255,0.2)] backdrop-blur-md select-text sm:inset-x-auto sm:right-5 sm:top-24 sm:bottom-40 sm:w-[380px]">
-      <div className="flex items-center justify-between border-b border-cyan-400/20 px-4 py-3">
-        <div className="flex gap-2">
-          {(["drafts", "ideas"] as const).map((k) => (
-            <button
-              key={k}
-              type="button"
-              onClick={() => setTab(k)}
-              className={`rounded-full px-3 py-1 font-display text-[10px] tracking-[0.2em] ${
-                tab === k ? "bg-cyan-400/20 text-cyan-100" : "text-cyan-400/60 hover:text-cyan-200"
-              }`}
-            >
-              {k === "drafts" ? `ENTWÜRFE ${vault.drafts.length}` : `IDEEN ${vault.ideas.length}`}
-            </button>
-          ))}
-        </div>
-        <button type="button" onClick={onClose} aria-label="Schließen" className="px-2 text-cyan-300/70 hover:text-cyan-100">
-          ✕
-        </button>
-      </div>
-
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4 text-[13px] leading-snug">
-        {tab === "drafts" &&
-          (vault.drafts.length === 0 ? (
-            <p className="text-cyan-400/60">Noch keine Entwürfe. Sag z. B.: „Schreib einen X-Post „über den Schleier.“</p>
-          ) : (
-            vault.drafts.map((d) => (
-              <div key={d.id} className="rounded-xl border border-cyan-400/20 bg-cyan-950/20 p-3">
-                <div className="mb-2 flex items-center justify-between font-mono text-[10px] text-cyan-400/80">
-                  <span>{PLATFORM_NAMES[d.platform] ?? d.platform}</span>
-                  <span className={d.tooLong ? "text-rose-300" : ""}>
-                    {d.chars}/{d.limit}
-                  </span>
-                </div>
-                {d.hook && <p className="mb-1 text-cyan-200/90">Hook: {d.hook}</p>}
-                <p className="whitespace-pre-wrap text-cyan-50">{d.text}</p>
-                {d.visualIdea && <p className="mt-2 text-[12px] text-cyan-300/70">Visual: {d.visualIdea}</p>}
-                <div className="mt-3 flex flex-wrap gap-2 font-mono text-[11px]">
-                  <button type="button" onClick={() => copy(d.id, d.text)} className="rounded-full border border-cyan-400/30 px-3 py-1 text-cyan-200 hover:bg-cyan-400/10">
-                    {copied === d.id ? "kopiert ✓" : "kopieren"}
-                  </button>
-                  {d.postUrl && (
-                    <a href={d.postUrl} target="_blank" rel="noopener noreferrer" className="rounded-full border border-cyan-300/50 px-3 py-1 text-cyan-100 hover:bg-cyan-400/15">
-                      selbst auf {PLATFORM_NAMES[d.platform]} posten ↗
-                    </a>
-                  )}
-                  <button type="button" onClick={() => onDeleteDraft(d.id)} className="ml-auto px-2 text-cyan-500/60 hover:text-rose-300">
-                    löschen
-                  </button>
-                </div>
-              </div>
-            ))
-          ))}
-
-        {tab === "ideas" &&
-          (vault.ideas.length === 0 ? (
-            <p className="text-cyan-400/60">Noch keine Ideen. Sag z. B.: „Merk dir die Idee …“</p>
-          ) : (
-            vault.ideas.map((i) => (
-              <div key={i.id} className="rounded-xl border border-cyan-400/20 bg-cyan-950/20 p-3">
-                <div className="flex items-start justify-between gap-2">
-                  <p className="font-medium text-cyan-50">{i.title}</p>
-                  {i.channel && <span className="shrink-0 font-mono text-[10px] text-cyan-400/80">{i.channel}</span>}
-                </div>
-                <p className="mt-1 text-cyan-100/80">{i.detail}</p>
-                <div className="mt-2 flex justify-end">
-                  <button type="button" onClick={() => onDeleteIdea(i.id)} className="font-mono text-[11px] text-cyan-500/60 hover:text-rose-300">
-                    löschen
-                  </button>
-                </div>
-              </div>
-            ))
-          ))}
-      </div>
-
-      <div className="flex gap-2 border-t border-cyan-400/20 px-4 py-3 font-mono text-[11px]">
-        <button
-          type="button"
-          onClick={() => download("vela-ideen.md", vaultMarkdown(vault), "text/markdown")}
-          className="rounded-full border border-cyan-400/30 px-3 py-1 text-cyan-200 hover:bg-cyan-400/10"
-        >
-          Export .md
-        </button>
-        <button
-          type="button"
-          onClick={() => download("vela-ideen.json", JSON.stringify(vault, null, 2), "application/json")}
-          className="rounded-full border border-cyan-400/30 px-3 py-1 text-cyan-200 hover:bg-cyan-400/10"
-        >
-          Export .json
-        </button>
-        <span className="ml-auto self-center text-cyan-500/50">nur in diesem Browser</span>
-      </div>
-    </div>
-  );
 }

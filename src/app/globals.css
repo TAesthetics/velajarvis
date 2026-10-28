@@ -1,9 +1,46 @@
 @import "tailwindcss";
 
+/* ---------- Accent palette: one set of tokens, two personas, smooth cross-fade ---------- */
+@property --acc-50 { syntax: "<color>"; inherits: true; initial-value: #ecfeff; }
+@property --acc-100 { syntax: "<color>"; inherits: true; initial-value: #cffafe; }
+@property --acc-200 { syntax: "<color>"; inherits: true; initial-value: #a5f3fc; }
+@property --acc-300 { syntax: "<color>"; inherits: true; initial-value: #67e8f9; }
+@property --acc-400 { syntax: "<color>"; inherits: true; initial-value: #22d3ee; }
+@property --acc-500 { syntax: "<color>"; inherits: true; initial-value: #06b6d4; }
+@property --acc-950 { syntax: "<color>"; inherits: true; initial-value: #083344; }
+@property --bg { syntax: "<color>"; inherits: true; initial-value: #02060c; }
+
 @theme inline {
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
   --font-display: var(--font-orbitron);
+  --color-accent-50: var(--acc-50);
+  --color-accent-100: var(--acc-100);
+  --color-accent-200: var(--acc-200);
+  --color-accent-300: var(--acc-300);
+  --color-accent-400: var(--acc-400);
+  --color-accent-500: var(--acc-500);
+  --color-accent-950: var(--acc-950);
+  --color-bg: var(--bg);
+}
+
+.app {
+  --glow: 0 200 255;
+  background: var(--bg);
+  transition:
+    --acc-50 0.8s, --acc-100 0.8s, --acc-200 0.8s, --acc-300 0.8s, --acc-400 0.8s, --acc-500 0.8s,
+    --acc-950 0.8s, --bg 0.8s;
+}
+.app.throng {
+  --acc-50: #fff8ed;
+  --acc-100: #ffedd5;
+  --acc-200: #fed7aa;
+  --acc-300: #fdba74;
+  --acc-400: #fb923c;
+  --acc-500: #f97316;
+  --acc-950: #2a1206;
+  --bg: #0a0604;
+  --glow: 255 170 80;
 }
 
 html,
@@ -11,36 +48,124 @@ body {
   background: #02060c;
   color: #cffafe;
   font-family: var(--font-geist-sans), system-ui, sans-serif;
+  overscroll-behavior: none;
 }
 
-.jarvis-grid {
+/* ---------- Background ---------- */
+.bg-grid {
   background-image:
-    linear-gradient(rgba(0, 180, 255, 0.07) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0, 180, 255, 0.07) 1px, transparent 1px);
+    linear-gradient(rgb(var(--glow) / 0.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(var(--glow) / 0.07) 1px, transparent 1px);
   background-size: 44px 44px;
   mask-image: radial-gradient(ellipse at center, black 20%, transparent 75%);
+  animation: grid-drift 40s linear infinite;
 }
-
-.jarvis-scan {
-  background: repeating-linear-gradient(
-    to bottom,
-    rgba(255, 255, 255, 0.025) 0px,
-    rgba(255, 255, 255, 0.025) 1px,
-    transparent 2px,
-    transparent 4px
-  );
-  animation: jarvis-flicker 6s infinite;
+@keyframes grid-drift {
+  to { background-position: 44px 44px, 44px 44px; }
 }
-
-@keyframes jarvis-flicker {
+.bg-vignette {
+  background: radial-gradient(ellipse at center, rgb(var(--glow) / 0.12) 0%, transparent 35%, rgb(2 6 12 / 0.95) 80%);
+}
+.bg-scan {
+  background: repeating-linear-gradient(to bottom, rgb(255 255 255 / 0.025) 0 1px, transparent 2px 4px);
+  animation: flicker 6s infinite;
+}
+@keyframes flicker {
   0%, 100% { opacity: 0.6; }
   50% { opacity: 0.35; }
 }
 
-/* Throng mode: warm, organic palette for the HUD chrome (orb draws its own colours) */
-.throng .hud {
-  filter: hue-rotate(-155deg) saturate(1.15);
+/* ---------- Aura behind the stage, driven by data-state ---------- */
+.aura {
+  background: radial-gradient(circle, rgb(var(--glow) / 0.16) 0%, transparent 62%);
+  transition: opacity 0.6s, transform 0.6s;
+  animation: breathe 6s ease-in-out infinite;
 }
-.throng {
-  background: #0a0604 !important;
+[data-state="listening"] .aura { animation: breathe 1.6s ease-in-out infinite; transform: scale(1.05); }
+[data-state="thinking"] .aura {
+  background: conic-gradient(from 0deg, transparent, rgb(var(--glow) / 0.14), transparent 40%, rgb(var(--glow) / 0.1), transparent 75%);
+  mask-image: radial-gradient(circle, black 30%, transparent 65%);
+  animation: spin 3s linear infinite;
+}
+[data-state="speaking"] .aura { animation: pulse-aura 0.55s ease-in-out infinite alternate; }
+[data-state="error"] .aura { background: radial-gradient(circle, rgb(255 70 95 / 0.18) 0%, transparent 62%); }
+@keyframes breathe {
+  0%, 100% { transform: scale(0.97); opacity: 0.75; }
+  50% { transform: scale(1.04); opacity: 1; }
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pulse-aura {
+  from { transform: scale(0.98); opacity: 0.7; }
+  to { transform: scale(1.08); opacity: 1; }
+}
+
+/* ---------- Subtitles: one short line at a time ---------- */
+.sub-line {
+  grid-area: 1 / 1;
+  text-shadow: 0 0 18px rgb(var(--glow) / 0.55), 0 1px 3px rgb(0 0 0 / 0.9);
+  transition: opacity 0.45s ease, transform 0.45s ease, filter 0.45s ease;
+  animation: sub-in 0.45s ease both;
+}
+.sub-line[data-out="true"] {
+  opacity: 0;
+  transform: translateY(-10px);
+  filter: blur(3px);
+}
+@keyframes sub-in {
+  from { opacity: 0; transform: translateY(10px); filter: blur(4px); }
+  to { opacity: 1; transform: none; filter: none; }
+}
+
+/* ---------- Small motion helpers ---------- */
+.fade-in { animation: fade-in 0.35s ease both; }
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+.panel-in { animation: panel-in 0.35s cubic-bezier(0.2, 0.9, 0.3, 1.1) both; }
+@keyframes panel-in {
+  from { opacity: 0; transform: translateY(16px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+.birth-pop { animation: birth-pop 1.4s ease-out both; }
+@keyframes birth-pop {
+  0% { opacity: 0; transform: translateY(4px) scale(0.6); }
+  20% { opacity: 1; transform: translateY(0) scale(1.15); }
+  100% { opacity: 0; transform: translateY(-18px) scale(1); }
+}
+.mic-ripple::before,
+.mic-ripple::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  border: 1px solid rgb(var(--glow) / 0.7);
+  animation: mic-ripple 1.6s ease-out infinite;
+}
+.mic-ripple::after { animation-delay: 0.8s; }
+@keyframes mic-ripple {
+  from { transform: scale(1); opacity: 0.9; }
+  to { transform: scale(1.9); opacity: 0; }
+}
+.boot-out { animation: fade-in 0.5s ease both; }
+
+.vault-ping { animation: vault-ping 0.9s ease-in-out 3; }
+@keyframes vault-ping {
+  50% { transform: scale(1.12); box-shadow: 0 0 26px rgb(var(--glow) / 0.95); }
+}
+
+/* ---------- Accessibility: respect reduced motion ---------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .sub-line { transition: opacity 0.2s linear !important; }
+  .sub-line[data-out="true"] { transform: none; filter: none; }
+  .mic-ripple::before,
+  .mic-ripple::after { display: none; }
 }

@@ -14,7 +14,12 @@ export const maxDuration = 30;
 const MODEL = process.env.JARVIS_MODEL || "openai/gpt-4.1-mini";
 
 export async function POST(req: Request) {
-  const { messages, lang, mode }: { messages: UIMessage[]; lang?: Lang; mode?: Mode } = await req.json();
+  const {
+    messages,
+    lang,
+    mode,
+    population,
+  }: { messages: UIMessage[]; lang?: Lang; mode?: Mode; population?: number } = await req.json();
 
   if (!process.env.VERCEL && !process.env.AI_GATEWAY_API_KEY && !process.env.VERCEL_OIDC_TOKEN) {
     return Response.json(
@@ -35,7 +40,9 @@ export async function POST(req: Request) {
 
   const result = streamText({
     model: MODEL,
-    instructions: personaPrompt(mode, l, now),
+    instructions: personaPrompt(mode, l, now, {
+      population: typeof population === "number" && population > 0 && population < 10_000 ? population : undefined,
+    }),
     messages: await convertToModelMessages(messages),
     tools: allTools,
     stopWhen: isStepCount(6),
