@@ -10,7 +10,7 @@ import { jarvisTools } from "@/lib/tools";
 
 export const maxDuration = 30;
 
-const MODEL = process.env.JARVIS_MODEL || "anthropic/claude-haiku-5.5";
+const MODEL = process.env.JARVIS_MODEL || "spacexai/grok-4.20-non-reasoning";
 
 function persona(lang: "de-DE" | "en-US") {
   const now = new Intl.DateTimeFormat("de-AT", {

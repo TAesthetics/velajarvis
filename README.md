@@ -27,7 +27,7 @@ Eine Next.js-Web-App mit leuchtendem, animiertem Orb, Sprachsteuerung (Deutsch/E
 
 - Next.js 16 (App Router, TypeScript, Tailwind CSS 4)
 - AI SDK 7 (`ai`, `@ai-sdk/react`) mit `streamText` + Tool-Calls
-- Vercel AI Gateway (Standardmodell `anthropic/claude-haiku-5.5`, über `JARVIS_MODEL` änderbar)
+- Vercel AI Gateway (Standardmodell `spacexai/grok-4.20-non-reasoning`, über `JARVIS_MODEL` änderbar)
 
 ## Lokal starten
 
