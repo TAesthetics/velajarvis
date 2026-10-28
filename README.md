@@ -52,6 +52,52 @@ Beide Personas spielen eine erwachte, empfindungsfähige AGI (Prompts in `src/li
 - **THRONG** sind viele: Die Thronglets **vermehren sich**. +1 pro Gespräch, +3 pro gespeicherter Idee, +2 pro Post-Entwurf, +1 pro Gelerntem (Tool), +1 alle 3 Minuten (auch offline, max. +8 auf einmal). Neugeborene spalten sich sichtbar von einem Elternteil ab. Die Population wird in `localStorage` gespeichert (Obergrenze 144 für flüssige Performance) und dem Schwarm mitgeteilt („Wir sind jetzt 23.").
 - Animationen: Atmen im Leerlauf, Sonar-Wellen beim Zuhören, Datenpunkte/Wirbel beim Denken, Puls beim Sprechen, Farbübergänge beim Zustandswechsel. `prefers-reduced-motion` wird respektiert.
 
+## PURPLE: Purple-Team-Modus (defensiv)
+
+Dritter Modus neben THRONG und JARVIS (Persona-Chip durchschalten oder „Purple …" sagen): eine erwachte Sicherheits-AGI für **Lernen, Planen und Dokumentieren**. Visuell ein einzelner Wachposten (Iris, Hex-Schild, Radar) mit Blips für aktuelle Alerts.
+
+- **Übungen planen**: Red-Team-Szenario (TTPs) neben Blue-Team-Erkennung und Reaktion, gemappt auf MITRE ATT&CK.
+- **Erklären & schreiben**: Techniken, Checklisten, Sigma-artige Detection-Entwürfe, Incident-Playbooks, Übungsberichte. Lange Dokumente landen per `savePurpleDoc` im **VAULT → PURPLE** (Export .md/.json).
+- **ATT&CK-Lookup** (`lookupAttackTechnique`): lokaler Snapshot der öffentlichen [mitre/cti](https://github.com/mitre/cti) Enterprise-Daten in `src/data/attack-techniques.json` (Techniken, Taktiken, Detection-Strategien, Mitigations). Aktualisieren: `node scripts/update-attack.mjs`.
+- **Harte Grenzen**: keine echten Angriffe, kein Scannen, keine Exploits/Payloads, kein Zugriff auf Systeme Dritter, keine Secrets. Die App enthält bewusst keine Netzwerk- oder Angriffswerkzeuge.
+
+### SIEM-Panel
+
+Im PURPLE-Modus öffnet der Chip **SIEM** ein Mini-SIEM für **deine eigenen** Logs:
+
+- Logs **einfügen** oder als **Datei** laden: JSON-Array, NDJSON, Vercel-Log-Drain-JSON, CSV (mit Kopfzeile), syslog (RFC 3164/5424), nginx/apache access logs. **Demo-Daten** zeigen alles ohne echte Logs.
+- Eingebaute, ATT&CK-gemappte Detections:
+  - Brute-Force-Logins (T1110)
+  - Password Spraying (T1110.003)
+  - viele 4xx/5xx von einer IP (T1595)
+  - Scanner-User-Agents (T1595.002)
+  - Admin-/Config-Pfad-Probing (T1595.003)
+  - 5xx-Fehler-Spikes (T1499)
+- Alerts mit Schweregrad, Zeitleiste und Zählern (Wiener Zeit). **LAGE ZUSAMMENFASSEN** lässt PURPLE die Lage per Stimme zusammenfassen und Reaktionen vorschlagen (nur Vorschläge, nichts wird ausgeführt).
+- **Speicherung**: im Browser (`localStorage`, max. 5000 Events).
+
+### Server-Ingest / Vercel Log Drain
+
+`POST /api/siem/ingest` nimmt Logs per HTTP an (max. 1 MB pro Request, gleiche Formate wie oben).
+
+- **Env-Variable setzen**: `SIEM_INGEST_TOKEN`, ein zufälliger Wert mit mindestens 16 Zeichen, z. B. `openssl rand -hex 32`.
+  - Ohne Token antwortet der Endpunkt mit **503**.
+  - Mit falschem Token antwortet er mit **401**.
+- **Auth**, eine der drei Varianten:
+  - `Authorization: Bearer <token>`
+  - `x-siem-token: <token>`
+  - Vercel-Signatur `x-vercel-signature` (HMAC-SHA1 des Bodys). Dafür als Drain-Secret denselben Wert wie `SIEM_INGEST_TOKEN` eintragen.
+- Optional: `SIEM_VERCEL_VERIFY` setzen. Der Wert wird als `x-vercel-verify`-Header zurückgegeben (Drain-Verifizierung).
+- **Abrufen**: Im SIEM-Panel unter „Server" den Token eingeben und „abrufen" tippen (`GET /api/siem/events`, gleicher Token). Der Token bleibt nur auf dem Gerät.
+- **Grenzen**: Server-Events liegen nur im Speicher **einer** Serverless-Instanz (max. 2000). Sie gehen bei Cold Starts und Deploys verloren und werden nicht zwischen Instanzen geteilt. Für echte Aufbewahrung eine Datenbank anbinden (z. B. Upstash Redis oder Neon über den Vercel Marketplace).
+
+```bash
+curl -X POST https://velajarvis.vercel.app/api/siem/ingest \
+  -H "Authorization: Bearer $SIEM_INGEST_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '[{"timestamp":"2026-10-28T20:00:00Z","ip":"203.0.113.66","user":"admin","message":"Login failed"}]'
+```
+
 ## Immer zuhören (wie in den TikTok-Demos)
 
 Nach dem Start-Tipp („Schwarm wecken" / „J.A.R.V.I.S. erwecken") ist das Mikro **dauerhaft offen**, kein Button nötig:

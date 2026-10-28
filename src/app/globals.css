@@ -43,6 +43,18 @@
   --glow: 255 170 80;
 }
 
+.app.purple {
+  --acc-50: #f7f2ff;
+  --acc-100: #ede4ff;
+  --acc-200: #dccbff;
+  --acc-300: #c4a6ff;
+  --acc-400: #a87bff;
+  --acc-500: #8b52f6;
+  --acc-950: #1c0f36;
+  --bg: #07040e;
+  --glow: 170 120 255;
+}
+
 html,
 body {
   background: #02060c;

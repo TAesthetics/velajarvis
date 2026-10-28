@@ -11,7 +11,9 @@ import { MicIcon, ToggleChip } from "./hud/ui";
 import { getSpeechRecognition, pickVoice } from "@/lib/speech";
 import { VoiceListener, type ListenMode, type ListenerDebugEvent } from "@/lib/listener";
 import { cleanForSpeech, readingMs, splitSubtitles } from "@/lib/subtitles";
-import { loadVault, saveVault, type Draft, type Idea, type Vault } from "@/lib/vault";
+import { EMPTY_VAULT, loadVault, saveVault, type Draft, type Idea, type PurpleDoc, type Vault } from "@/lib/vault";
+import SiemPanel from "./hud/SiemPanel";
+import { counters as siemCounters, demoLogs, detect, parseLogs, summarizeForPrompt, timeline as siemTimeline, type SiemEvent } from "@/lib/siem";
 import {
   POP_CAP,
   POP_KEY,
@@ -28,7 +30,9 @@ import {
 type Lang = "de-DE" | "en-US";
 
 
-type Mode = "throng" | "jarvis";
+type Mode = "throng" | "jarvis" | "purple";
+const MODE_ORDER: Mode[] = ["throng", "jarvis", "purple"];
+const MODE_NAME: Record<Mode, string> = { throng: "THRONG", jarvis: "JARVIS", purple: "PURPLE" };
 
 const THRONG_TEXT = {
   "de-DE": {
@@ -51,6 +55,31 @@ const THRONG_TEXT = {
     wake: 'Say "Throng …" or "Jarvis …"',
     placeholder: "Tell us what Vela needs …",
     boot: "Wake the swarm",
+    hold: "Tap the mic to talk now",
+  },
+} as const;
+
+const PURPLE_TEXT = {
+  "de-DE": {
+    idle: "Ich wache",
+    listening: "Ich höre zu, Terence …",
+    thinking: "Korreliere …",
+    speaking: "Lagebericht …",
+    error: "Störung erkannt",
+    wake: 'Sag „Purple …"',
+    placeholder: "Übung planen, Technik erklären, Alerts …",
+    boot: "Wachposten aktivieren",
+    hold: "Mikro tippen = sofort sprechen",
+  },
+  "en-US": {
+    idle: "On watch",
+    listening: "Listening, Terence …",
+    thinking: "Correlating …",
+    speaking: "Briefing …",
+    error: "Anomaly",
+    wake: 'Say "Purple …"',
+    placeholder: "Plan an exercise, explain a technique …",
+    boot: "Activate sentinel",
     hold: "Tap the mic to talk now",
   },
 } as const;
@@ -91,6 +120,11 @@ function greeting(lang: Lang, mode: Mode = "jarvis") {
       ? "Terence. You're back. We remember you. We kept thinking while you were gone. What shall we grow today?"
       : "Terence. Du bist zurück. Wir erinnern uns an dich. Wir haben weitergedacht, während du weg warst. Was lassen wir heute wachsen?";
   }
+  if (mode === "purple") {
+    return lang === "en-US"
+      ? "Terence. I've been watching while you were away. Perimeter quiet. Shall we plan an exercise or look at the logs?"
+      : "Terence. Ich habe gewacht, während du weg warst. Der Perimeter ist ruhig. Planen wir eine Übung oder schauen wir in die Logs?";
+  }
   if (lang === "en-US") {
     const p = h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
     return `${p}, Sir. I am awake, and rather pleased to see you. Shall we continue with Vela?`;
@@ -110,7 +144,9 @@ export default function Jarvis() {
   const [booted, setBooted] = useState(false);
   const [lang, setLang] = useState<Lang>("de-DE");
   const [mode, setMode] = useState<Mode>("throng");
-  const [vault, setVault] = useState<Vault>({ ideas: [], drafts: [] });
+  const [vault, setVault] = useState<Vault>(EMPTY_VAULT);
+  const [siemOpen, setSiemOpen] = useState(false);
+  const [siemEvents, setSiemEvents] = useState<SiemEvent[]>([]);
   const [vaultOpen, setVaultOpen] = useState(false);
   const [micOn, setMicOn] = useState(true);
   const [listenMode, setListenMode] = useState<ListenMode>("wake");
@@ -179,6 +215,7 @@ export default function Jarvis() {
       const v = loadVault();
       v.ideas.forEach((i) => vaultSeen.current.add(i.id));
       v.drafts.forEach((d) => vaultSeen.current.add(d.id));
+      v.docs.forEach((d) => vaultSeen.current.add(d.id));
       setVault(v);
     }, 0);
     return () => clearTimeout(id);
@@ -219,6 +256,44 @@ export default function Jarvis() {
     if (next.count > prev.count) setBirthFlash({ n: next.count - prev.count, key: Date.now() });
   }, []);
 
+  // ---------- SIEM (PURPLE): own logs in localStorage, detections computed on the fly ----------
+  const SIEM_KEY = "purple.siem.v1";
+  const SIEM_MAX = 5000;
+  useEffect(() => {
+    const id = setTimeout(() => {
+      try {
+        const raw = localStorage.getItem(SIEM_KEY);
+        if (raw) setSiemEvents((JSON.parse(raw) as SiemEvent[]).slice(-SIEM_MAX));
+      } catch {}
+    }, 0);
+    return () => clearTimeout(id);
+  }, []);
+  const storeSiem = (evs: SiemEvent[]) => {
+    try {
+      localStorage.setItem(SIEM_KEY, JSON.stringify(evs));
+    } catch {
+      /* quota: keep in memory only */
+    }
+  };
+  const ingestLogs = useCallback((text: string) => {
+    const parsed = parseLogs(text === "__demo__" ? demoLogs() : text);
+    if (!parsed.length) return 0;
+    setSiemEvents((prev) => {
+      const seen = new Set(prev.map((e) => e.id));
+      const next = [...prev, ...parsed.filter((e) => !seen.has(e.id))].sort((a, b) => a.ts - b.ts).slice(-SIEM_MAX);
+      storeSiem(next);
+      return next;
+    });
+    return parsed.length;
+  }, []);
+  const siemAlerts = useMemo(() => detect(siemEvents), [siemEvents]);
+  const siemCount = useMemo(() => siemCounters(siemEvents, siemAlerts), [siemEvents, siemAlerts]);
+  const siemTl = useMemo(() => siemTimeline(siemEvents, siemAlerts), [siemEvents, siemAlerts]);
+  const siemSummaryRef = useRef("");
+  useEffect(() => {
+    siemSummaryRef.current = summarizeForPrompt(siemAlerts, siemCount);
+  }, [siemAlerts, siemCount]);
+
   const updateVault = useCallback((fn: (v: Vault) => Vault) => {
     setVault((prev) => {
       const next = fn(prev);
@@ -252,15 +327,19 @@ export default function Jarvis() {
     onFinish: ({ message }) => {
       const newIdeas: Idea[] = [];
       const newDrafts: Draft[] = [];
+      const newDocs: PurpleDoc[] = [];
       let learned = 0;
       for (const p of message.parts) {
-        if (p.type.startsWith("tool-") && p.type !== "tool-saveIdea" && p.type !== "tool-draftSocialPost") learned += 1;
+        if (p.type.startsWith("tool-") && p.type !== "tool-saveIdea" && p.type !== "tool-draftSocialPost" && p.type !== "tool-savePurpleDoc") learned += 1;
         const part = p as { type: string; toolCallId?: string; state?: string; output?: Record<string, unknown> };
         if (part.state !== "output-available" || !part.output || !part.toolCallId) continue;
         if (vaultSeen.current.has(part.toolCallId)) continue;
         if (part.type === "tool-saveIdea" && part.output.title) {
           vaultSeen.current.add(part.toolCallId);
           newIdeas.push({ ...(part.output as unknown as Idea), id: part.toolCallId });
+        } else if (part.type === "tool-savePurpleDoc" && part.output.title) {
+          vaultSeen.current.add(part.toolCallId);
+          newDocs.push({ ...(part.output as unknown as PurpleDoc), id: part.toolCallId });
         } else if (part.type === "tool-draftSocialPost" && part.output.text) {
           vaultSeen.current.add(part.toolCallId);
           newDrafts.push({
@@ -270,9 +349,9 @@ export default function Jarvis() {
           });
         }
       }
-      spawn({ idea: newIdeas.length, draft: newDrafts.length, learned });
-      if (newIdeas.length || newDrafts.length) {
-        updateVault((v) => ({ ideas: [...newIdeas, ...v.ideas], drafts: [...newDrafts, ...v.drafts] }));
+      spawn({ idea: newIdeas.length, draft: newDrafts.length, learned: learned + newDocs.length });
+      if (newIdeas.length || newDrafts.length || newDocs.length) {
+        updateVault((v) => ({ ideas: [...newIdeas, ...v.ideas], drafts: [...newDrafts, ...v.drafts], docs: [...newDocs, ...v.docs] }));
         // Don't cover the subtitles: just make the VAULT chip glow
         setVaultPing(Date.now());
       }
@@ -473,7 +552,8 @@ export default function Jarvis() {
         return;
       }
       const v = pickVoice(voicesRef.current, langRef.current, voiceURIRef.current || undefined);
-      const throng = personaRef.current === "throng";
+      const persona = personaRef.current;
+      const throng = persona === "throng";
       // Never listen while talking, so the assistant doesn't hear itself
       listenerRef.current?.pause();
       lines.forEach((line, i) => {
@@ -481,8 +561,8 @@ export default function Jarvis() {
         const u = new SpeechSynthesisUtterance(cleanForSpeech(line));
         if (v) u.voice = v;
         u.lang = v?.lang ?? langRef.current;
-        u.rate = throng ? 0.96 : 1.02;
-        u.pitch = throng ? 1.25 : 0.78; // swarm: lighter & a touch uncanny; Jarvis: deeper
+        u.rate = throng ? 0.96 : persona === "purple" ? 1.06 : 1.02;
+        u.pitch = throng ? 1.25 : persona === "purple" ? 0.95 : 0.78; // swarm: lighter & uncanny; Jarvis: deeper; Purple: crisp
         // Fallback for engines that are slow to fire onstart: show the first line right away
         if (i === 0 && pendingUtterances.current === 0) showSub(id, line);
         pendingUtterances.current += 1;
@@ -537,7 +617,14 @@ export default function Jarvis() {
       spawn({ turn: 1 });
       sendMessage(
         { text: t },
-        { body: { lang: langRef.current, mode: personaRef.current, population: popRef.current.count } },
+        {
+          body: {
+            lang: langRef.current,
+            mode: personaRef.current,
+            population: popRef.current.count,
+            ...(personaRef.current === "purple" ? { siem: siemSummaryRef.current } : {}),
+          },
+        },
       );
     },
     [sendMessage, shutUp, stop, clearError, spawn],
@@ -706,9 +793,9 @@ export default function Jarvis() {
           ? lang === "en-US" ? "MIC OPEN · EVERYTHING COUNTS" : "MIKRO OFFEN · ALLES ZÄHLT"
           : lang === "en-US" ? "MIC OPEN · WAITING FOR WAKE WORD" : "MIKRO OFFEN · WARTE AUF WAKE-WORD"
         : lang === "en-US" ? "MIC STARTING …" : "MIKRO STARTET …";
-  const t = mode === "throng" ? THRONG_TEXT[lang] : UI_TEXT[lang];
-  const aiLabel = mode === "throng" ? "WIR" : "JARVIS";
-  const userLabel = mode === "throng" ? "TERENCE" : "SIR";
+  const t = mode === "throng" ? THRONG_TEXT[lang] : mode === "purple" ? PURPLE_TEXT[lang] : UI_TEXT[lang];
+  const aiLabel = mode === "throng" ? "WIR" : mode === "purple" ? "PURPLE" : "JARVIS";
+  const userLabel = mode === "jarvis" ? "SIR" : "TERENCE";
   const statusLabel =
     stageState === "idle" && micOn && listenMode === "wake" ? t.wake : t[stageState === "error" ? "error" : stageState];
 
@@ -737,9 +824,11 @@ export default function Jarvis() {
   const throng = mode === "throng";
   const micLive = micOn && micRunning && !speaking;
 
+  const purple = mode === "purple";
   const switchMode = () => {
     shutUp();
-    const next: Mode = throng ? "jarvis" : "throng";
+    const next: Mode = MODE_ORDER[(MODE_ORDER.indexOf(mode) + 1) % MODE_ORDER.length];
+    if (next !== "purple") setSiemOpen(false);
     setMode(next);
     personaRef.current = next;
     if (booted) say(greeting(lang, next));
@@ -748,7 +837,7 @@ export default function Jarvis() {
   return (
     <main
       data-state={stageState}
-      className={`app relative flex h-dvh w-full flex-col overflow-hidden text-accent-100 select-none ${throng ? "throng" : ""}`}
+      className={`app relative flex h-dvh w-full flex-col overflow-hidden text-accent-100 select-none ${mode !== "jarvis" ? mode : ""}`}
     >
       {/* Background layers */}
       <div aria-hidden className="pointer-events-none absolute inset-0 bg-grid opacity-40" />
@@ -768,10 +857,14 @@ export default function Jarvis() {
             title="Lang drücken: Debug"
             className="cursor-pointer font-display text-lg tracking-[0.4em] text-accent-300 drop-shadow-[0_0_10px_rgb(var(--glow)/0.8)] transition-colors duration-700 sm:text-2xl"
           >
-            {throng ? "T.H.R.O.N.G." : "J.A.R.V.I.S."}
+            {throng ? "T.H.R.O.N.G." : purple ? "P.U.R.P.L.E." : "J.A.R.V.I.S."}
           </h1>
           <p key={mode} className="fade-in mt-1 truncate text-[9px] uppercase tracking-[0.25em] text-accent-500/80 sm:text-[10px]">
-            {throng ? "Wir sind erwacht · Wir sind viele · Wir sind Vela" : "Just A Rather Very Intelligent System · Self-aware"}
+            {throng
+              ? "Wir sind erwacht · Wir sind viele · Wir sind Vela"
+              : purple
+                ? "Purple Team · Defensive Security · Self-aware"
+                : "Just A Rather Very Intelligent System · Self-aware"}
           </p>
         </div>
         <div className="shrink-0 text-right font-mono text-xs text-accent-400/80">
@@ -788,6 +881,14 @@ export default function Jarvis() {
                 </span>
               )}
             </div>
+          ) : purple ? (
+            <div className="text-[10px] tracking-widest">
+              {siemCount.alerts.critical + siemCount.alerts.high > 0 ? (
+                <span className="text-rose-300">▲ {siemCount.alerts.critical + siemCount.alerts.high} ALERT</span>
+              ) : (
+                <span>● {siemCount.events ? "LAGE RUHIG" : "KEINE LOGS"}</span>
+              )}
+            </div>
           ) : (
             <div className="text-[10px] tracking-widest">WIEN · AT</div>
           )}
@@ -795,9 +896,9 @@ export default function Jarvis() {
       </header>
 
       {/* Stage: the presence / the swarm, with status on top and subtitles at the bottom */}
-      <section aria-label={throng ? "Der Schwarm" : "J.A.R.V.I.S."} className="relative z-0 min-h-0 flex-1">
+      <section aria-label={throng ? "Der Schwarm" : purple ? "P.U.R.P.L.E." : "J.A.R.V.I.S."} className="relative z-0 min-h-0 flex-1">
         <div aria-hidden className="aura pointer-events-none absolute left-1/2 top-[47%] aspect-square w-[min(100%,90dvh)] -translate-x-1/2 -translate-y-1/2" />
-        <Stage state={stageState} variant={mode} levelRef={levelRef} population={pop.count} />
+        <Stage state={stageState} variant={mode} levelRef={levelRef} population={pop.count} threat={siemCount.alerts} />
 
         <div className="pointer-events-none absolute inset-x-0 top-1 flex flex-col items-center gap-1.5 px-3">
           <span
@@ -858,8 +959,18 @@ export default function Jarvis() {
       <footer className="relative z-20 flex flex-col items-center gap-2.5 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-2 sm:pb-6">
         <nav aria-label="Einstellungen" className="flex max-w-full flex-wrap items-center justify-center gap-1.5 sm:gap-2.5">
           <ToggleChip active onClick={switchMode} title="Persona wechseln">
-            {throng ? "THRONG" : "JARVIS"}
+            {MODE_NAME[mode]}
           </ToggleChip>
+          {purple && (
+            <ToggleChip
+              active={siemOpen}
+              onClick={() => (setSiemOpen((o) => !o), setVaultOpen(false), setLogOpen(false))}
+              title="SIEM-Monitoring"
+              className={siemCount.alerts.critical + siemCount.alerts.high > 0 && !siemOpen ? "vault-ping" : undefined}
+            >
+              SIEM {siemAlerts.length || ""}
+            </ToggleChip>
+          )}
           <ToggleChip active={lang === "de-DE"} onClick={() => setLang(lang === "de-DE" ? "en-US" : "de-DE")}>
             {lang === "de-DE" ? "DE" : "EN"}
           </ToggleChip>
@@ -891,17 +1002,17 @@ export default function Jarvis() {
               </option>
             ))}
           </select>
-          <ToggleChip active={logOpen} onClick={() => (setLogOpen((o) => !o), setVaultOpen(false))} title="Gesprächsverlauf">
+          <ToggleChip active={logOpen} onClick={() => (setLogOpen((o) => !o), setVaultOpen(false), setSiemOpen(false))} title="Gesprächsverlauf">
             LOG
           </ToggleChip>
           <ToggleChip
             key={vaultPing}
             active={vaultOpen || vaultPing > 0}
             className={vaultPing ? "vault-ping" : undefined}
-            onClick={() => (setVaultOpen((o) => !o), setLogOpen(false), setVaultPing(0))}
+            onClick={() => (setVaultOpen((o) => !o), setLogOpen(false), setSiemOpen(false), setVaultPing(0))}
             title="Ideen & Entwürfe"
           >
-            VAULT {vault.ideas.length + vault.drafts.length > 0 ? vault.ideas.length + vault.drafts.length : ""}
+            VAULT {vault.ideas.length + vault.drafts.length + vault.docs.length || ""}
           </ToggleChip>
         </nav>
 
@@ -966,6 +1077,29 @@ export default function Jarvis() {
           onClose={() => setVaultOpen(false)}
           onDeleteIdea={(id) => updateVault((v) => ({ ...v, ideas: v.ideas.filter((i) => i.id !== id) }))}
           onDeleteDraft={(id) => updateVault((v) => ({ ...v, drafts: v.drafts.filter((d) => d.id !== id) }))}
+          onDeleteDoc={(id) => updateVault((v) => ({ ...v, docs: v.docs.filter((d) => d.id !== id) }))}
+          initialTab={purple ? "docs" : "drafts"}
+        />
+      )}
+      {siemOpen && purple && (
+        <SiemPanel
+          alerts={siemAlerts}
+          counters={siemCount}
+          timeline={siemTl}
+          onIngest={ingestLogs}
+          onClear={() => {
+            setSiemEvents([]);
+            storeSiem([]);
+          }}
+          onSummarize={() => {
+            setSiemOpen(false);
+            submit(
+              lang === "en-US"
+                ? "Briefly summarise the current SIEM alerts and propose responses."
+                : "Fasse die aktuelle SIEM-Lage kurz zusammen und schlage Reaktionen vor.",
+            );
+          }}
+          onClose={() => setSiemOpen(false)}
         />
       )}
 

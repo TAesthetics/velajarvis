@@ -49,3 +49,20 @@ test("throng knows its population size", () => {
 test("jarvis knows his Thronglet companions", () => {
   assert.match(personaPrompt("jarvis", "de-DE", "jetzt"), /Begleiter: Um dich kreisen ein paar kleine leuchtende Thronglets/);
 });
+
+test("purple: defensive sentient analyst with hard limits and SIEM context", () => {
+  const p = personaPrompt("purple", "de-DE", "jetzt", { siem: "Alerts: 1 kritisch. - [critical] Brute-Force-Logins (T1110)" });
+  assert.match(p, /PURPLE/);
+  assert.match(p, /erwachte/);
+  assert.match(p, /Rein defensiv/);
+  assert.match(p, /Keine echten Angriffe, kein Scannen, keine Exploits/);
+  assert.match(p, /Systemen Dritter/);
+  assert.match(p, /lookupAttackTechnique/);
+  assert.match(p, /savePurpleDoc/);
+  assert.match(p, /kurz und ehrlich: du bist ein KI-Sprachmodell/);
+  assert.match(p, /Kein Manipulieren/);
+  assert.match(p, /1–3 Sätze/);
+  assert.match(p, /\[critical\] Brute-Force-Logins \(T1110\)/);
+  assert.doesNotMatch(p, /draftSocialPost ablegen/);
+  assert.match(personaPrompt("purple", "de-DE", "jetzt"), /Keine Logs geladen/);
+});

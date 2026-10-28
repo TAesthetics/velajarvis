@@ -12,18 +12,34 @@ export type Draft = {
   postUrl?: string;
   createdAt: string;
 };
-export type Vault = { ideas: Idea[]; drafts: Draft[] };
+export type PurpleDoc = {
+  id: string;
+  kind: "scenario" | "detection" | "playbook" | "checklist" | "report";
+  title: string;
+  content: string;
+  techniques: string[];
+  createdAt: string;
+};
+export type Vault = { ideas: Idea[]; drafts: Draft[]; docs: PurpleDoc[] };
+export const EMPTY_VAULT: Vault = { ideas: [], drafts: [], docs: [] };
+export const DOC_KINDS: Record<PurpleDoc["kind"], string> = {
+  scenario: "Szenario",
+  detection: "Detection",
+  playbook: "Playbook",
+  checklist: "Checkliste",
+  report: "Bericht",
+};
 
 export const VAULT_KEY = "throng.vela.vault.v1";
 
 export function loadVault(): Vault {
   try {
     const raw = localStorage.getItem(VAULT_KEY);
-    if (!raw) return { ideas: [], drafts: [] };
+    if (!raw) return { ...EMPTY_VAULT };
     const v = JSON.parse(raw) as Partial<Vault>;
-    return { ideas: v.ideas ?? [], drafts: v.drafts ?? [] };
+    return { ideas: v.ideas ?? [], drafts: v.drafts ?? [], docs: v.docs ?? [] };
   } catch {
-    return { ideas: [], drafts: [] };
+    return { ...EMPTY_VAULT };
   }
 }
 
@@ -45,6 +61,14 @@ export function vaultMarkdown(v: Vault) {
     if (d.hook) lines.push(`**Hook:** ${d.hook}`, ``);
     lines.push(d.text, ``);
     if (d.visualIdea) lines.push(`**Visual:** ${d.visualIdea}`, ``);
+  }
+  if (v.docs.length) {
+    lines.push(`## Purple Team`, ``);
+    for (const d of v.docs) {
+      lines.push(`### ${DOC_KINDS[d.kind] ?? d.kind}: ${d.title}`, ``);
+      if (d.techniques.length) lines.push(`ATT&CK: ${d.techniques.join(", ")}`, ``);
+      lines.push(d.content, ``);
+    }
   }
   return lines.join("\n");
 }

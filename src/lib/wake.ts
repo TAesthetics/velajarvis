@@ -1,10 +1,10 @@
 /**
- * Fuzzy wake-word matching for "Jarvis" / "Throng".
+ * Fuzzy wake-word matching for "Jarvis" / "Throng" / "Purple".
  * German speech recognition mangles both words a lot ("Service", "Travis", "Thron", "strong" …),
  * so we combine an explicit variant list with a small Levenshtein tolerance.
  */
 
-export type WakeWord = "jarvis" | "throng";
+export type WakeWord = "jarvis" | "throng" | "purple";
 
 export type WakeMatch = {
   word: WakeWord;
@@ -24,11 +24,13 @@ const VARIANTS: Record<WakeWord, string[]> = {
     "throng", "throngs", "thron", "throne", "thrown", "strong", "drong", "trong", "throng's",
     "throm", "schwarm", "thrones",
   ],
+  purple: ["purple", "purpel", "pörpel", "pörple", "porpel", "purpl", "purpur", "pupple", "perple", "purples"],
 };
 
 const CANONICAL: Record<WakeWord, string[]> = {
   jarvis: ["jarvis"],
   throng: ["throng", "schwarm"],
+  purple: ["purple"],
 };
 
 // Words that may precede the wake word and should be dropped ("Hey Jarvis", "Okay Throng").

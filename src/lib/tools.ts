@@ -1,6 +1,7 @@
 import { tool } from "ai";
 import { z } from "zod";
 import { VELA_REPO } from "./vela-knowledge";
+import { ATTACK_SOURCE, lookupTechniques } from "./attack";
 
 const WEATHER_CODES: Record<number, string> = {
   0: "klarer Himmel",
@@ -269,4 +270,51 @@ export const marketingTools = {
   }),
 };
 
-export const allTools = { ...jarvisTools, ...marketingTools };
+export const purpleTools = {
+  lookupAttackTechnique: tool({
+    description:
+      "Schlägt MITRE-ATT&CK-Enterprise-Techniken nach (lokaler Snapshot der öffentlichen mitre/cti-Daten): per ID (z. B. T1110, T1110.003) oder Stichwort (z. B. 'password spraying'). Liefert Name, Taktiken, Beschreibung, Detection-Strategien und Mitigations.",
+    inputSchema: z.object({
+      query: z.string().describe("Technik-ID oder Stichworte"),
+    }),
+    execute: async ({ query }) => {
+      const hits = lookupTechniques(query, 4);
+      return {
+        source: `MITRE ATT&CK Enterprise (mitre/cti, Stand ${ATTACK_SOURCE.version})`,
+        results: hits.map((t) => ({
+          id: t.id,
+          name: t.name,
+          tactics: t.tactics,
+          platforms: t.platforms.slice(0, 6),
+          description: t.description,
+          detectionStrategies: t.detectionStrategies ?? [],
+          mitigations: t.mitigations ?? [],
+          url: t.url,
+        })),
+        note: hits.length ? undefined : "Keine Technik gefunden. Andere Stichworte oder eine T-ID versuchen.",
+      };
+    },
+  }),
+
+  savePurpleDoc: tool({
+    description:
+      "Legt ein Purple-Team-Dokument im Vault ab (im Browser gespeichert, exportierbar): Übungsszenario, Detection-Entwurf (Sigma-artig), Incident-Playbook, Checkliste oder Übungsbericht. Inhalt als Markdown. Rein defensiv: keine Exploits, keine Payloads, keine Secrets.",
+    inputSchema: z.object({
+      kind: z.enum(["scenario", "detection", "playbook", "checklist", "report"]),
+      title: z.string(),
+      content: z.string().describe("Markdown-Inhalt. Bei Szenarien: Red (ATT&CK-TTPs) | Blue (Erkennung) | Reaktion."),
+      techniques: z.array(z.string()).optional().describe("ATT&CK-IDs, z. B. ['T1110','T1078']"),
+    }),
+    execute: async ({ kind, title, content, techniques }) => ({
+      id: `doc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+      kind,
+      title,
+      content: content.slice(0, 20_000),
+      techniques: (techniques ?? []).filter((t) => /^T\d{4}(\.\d{3})?$/.test(t)),
+      createdAt: new Date().toISOString(),
+      saved: true,
+    }),
+  }),
+};
+
+export const allTools = { ...jarvisTools, ...marketingTools, ...purpleTools };

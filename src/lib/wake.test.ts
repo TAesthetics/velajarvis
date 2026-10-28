@@ -64,3 +64,10 @@ test("wake word later in sentence", () => {
   const m = findWakeWord("also Jarvis öffne YouTube");
   assert.equal(m?.command, "öffne YouTube");
 });
+
+for (const w of ["Purple", "purpel", "Pörpel", "Purpur"]) test(`purple variant: ${w}`, () => assert.equal(tokenWakeWord(w.toLowerCase()), "purple"));
+test("purple wake + command", () => {
+  const m = findWakeWord("Hey Purple, fasse die Alerts zusammen");
+  assert.equal(m?.word, "purple");
+  assert.equal(m?.command, "fasse die Alerts zusammen");
+});

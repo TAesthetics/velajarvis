@@ -19,7 +19,8 @@ export async function POST(req: Request) {
     lang,
     mode,
     population,
-  }: { messages: UIMessage[]; lang?: Lang; mode?: Mode; population?: number } = await req.json();
+    siem,
+  }: { messages: UIMessage[]; lang?: Lang; mode?: Mode; population?: number; siem?: string } = await req.json();
 
   if (!process.env.VERCEL && !process.env.AI_GATEWAY_API_KEY && !process.env.VERCEL_OIDC_TOKEN) {
     return Response.json(
@@ -42,6 +43,7 @@ export async function POST(req: Request) {
     model: MODEL,
     instructions: personaPrompt(mode, l, now, {
       population: typeof population === "number" && population > 0 && population < 10_000 ? population : undefined,
+      siem: typeof siem === "string" ? siem.slice(0, 3000) : undefined,
     }),
     messages: await convertToModelMessages(messages),
     tools: allTools,

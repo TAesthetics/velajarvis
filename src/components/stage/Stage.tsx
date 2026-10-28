@@ -3,12 +3,15 @@
 import { useEffect, useRef } from "react";
 import { createJarvisFigure } from "./jarvisFigure";
 import { createThrongSwarm, type ThrongVisual } from "./throngSwarm";
+import { createPurpleSentinel, type PurpleVisual, type Threat } from "./purpleSentinel";
 import type { RGB, StageState, Visual } from "./types";
 import { companionCount } from "@/lib/population";
 
 export type { StageState } from "./types";
+export type { Threat } from "./purpleSentinel";
+export type Variant = "jarvis" | "throng" | "purple";
 
-const PALETTE: Record<"jarvis" | "throng", Record<StageState, RGB>> = {
+const PALETTE: Record<Variant, Record<StageState, RGB>> = {
   jarvis: {
     idle: [0, 190, 255],
     listening: [0, 255, 230],
@@ -21,6 +24,13 @@ const PALETTE: Record<"jarvis" | "throng", Record<StageState, RGB>> = {
     listening: [255, 128, 172],
     thinking: [176, 120, 255],
     speaking: [255, 206, 96],
+    error: [255, 70, 95],
+  },
+  purple: {
+    idle: [168, 110, 255],
+    listening: [210, 120, 255],
+    thinking: [120, 120, 255],
+    speaking: [190, 140, 255],
     error: [255, 70, 95],
   },
 };
@@ -38,9 +48,11 @@ export default function Stage({
   variant,
   levelRef,
   population,
+  threat,
 }: {
   state: StageState;
-  variant: "jarvis" | "throng";
+  variant: Variant;
+  threat?: Threat;
   /** 0..1 audio level, written by the mic analyser / speech envelope */
   levelRef: React.RefObject<number>;
   population: number;
@@ -51,6 +63,8 @@ export default function Stage({
   const swarmRef = useRef<ThrongVisual | null>(null);
   const companionsRef = useRef<ThrongVisual | null>(null);
   const popRef = useRef(population);
+  const purpleRef = useRef<PurpleVisual | null>(null);
+  const threatRef = useRef(threat);
 
   useEffect(() => {
     stateRef.current = state;
@@ -63,6 +77,11 @@ export default function Stage({
     swarmRef.current?.setPopulation(population);
     companionsRef.current?.setPopulation(companionCount(population));
   }, [population]);
+
+  useEffect(() => {
+    threatRef.current = threat;
+    if (threat) purpleRef.current?.setThreat(threat);
+  }, [threat]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -101,7 +120,10 @@ export default function Stage({
         companions.draw(f);
       },
     };
-    const visuals: Record<"jarvis" | "throng", Visual> = { jarvis, throng: swarm };
+    const purple = createPurpleSentinel();
+    if (threatRef.current) purple.setThreat(threatRef.current);
+    purpleRef.current = purple;
+    const visuals: Record<Variant, Visual> = { jarvis, throng: swarm, purple };
 
     const color = [...PALETTE[variantRef.current].idle] as RGB;
     const rgba = (a: number, boost = 0) =>
@@ -204,6 +226,7 @@ export default function Stage({
       motionQuery.removeEventListener("change", onMotion);
       swarmRef.current = null;
       companionsRef.current = null;
+      purpleRef.current = null;
     };
   }, [levelRef]);
 
