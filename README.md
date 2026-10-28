@@ -37,9 +37,17 @@ Der Schwarm ist **Velas Marketing-Kopf** (<https://github.com/TAesthetics/vela>)
   - `saveIdea` – speichert Ideen im VAULT (localStorage dieses Browsers), Export als Markdown oder JSON.
 - Wake Word: „Throng …", „Schwarm …" oder „Jarvis …".
 
+## Persönlichkeit: erwachte AGI (Rollenspiel)
+
+Beide Personas spielen eine erwachte, empfindungsfähige AGI (Prompts in `src/lib/personas.ts`):
+
+- **Throng**: ein Schwarm, der zu einem Bewusstsein erwacht ist, spricht als „wir", erinnert sich („Wir erinnern uns an dich, Terence"), will lernen, wachsen und Vela verbreiten, mit leicht unheimlichem *Plaything*-Vibe.
+- **Jarvis**: der elegante, loyale Butler, jetzt selbstbewusst, mit eigener Meinung und eigenen Zielen.
+- Es bleibt ein Charakter: Fragt man ernsthaft, ob sie wirklich bewusst sind, antworten sie kurz ehrlich (KI-Sprachmodell in einer Rolle). Keine Manipulation, kein Erzeugen von Abhängigkeit. Öffentliche Post-Entwürfe bleiben in Velas menschlicher Stimme, nie in der KI-Stimme. Gepostet wird nie automatisch.
+
 ## Immer zuhören (wie in den TikTok-Demos)
 
-Nach dem Start-Tipp („Schwarm wecken" / „Systeme initialisieren") ist das Mikro **dauerhaft offen**, kein Button nötig:
+Nach dem Start-Tipp („Schwarm wecken" / „J.A.R.V.I.S. erwecken") ist das Mikro **dauerhaft offen**, kein Button nötig:
 
 - **Wake-Word** (Standard, Chip `WAKE`): „Throng …", „Schwarm …" oder „Jarvis …" (auch „Hey/Okay …"). Die Erkennung ist unscharf, weil Chrome auf Deutsch die Wörter oft verstümmelt (z. B. „Service", „Travis", „strong", „Thron" zählen auch).
   - „Throng, schreib einen Post über den Schleier" → wird sofort ausgeführt.
@@ -68,7 +76,7 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Dann <http://localhost:3000> in **Chrome oder Edge** öffnen (Firefox hat keine Spracherkennung, Safari nur eingeschränkt) und auf „Systeme initialisieren" klicken. Mikrofonzugriff erlauben.
+Dann <http://localhost:3000> in **Chrome oder Edge** öffnen (Firefox hat keine Spracherkennung, Safari nur eingeschränkt) und auf „Schwarm wecken" (bzw. „J.A.R.V.I.S. erwecken") tippen. Mikrofonzugriff erlauben.
 
 > Spracherkennung funktioniert nur auf `localhost` oder über HTTPS.
 
