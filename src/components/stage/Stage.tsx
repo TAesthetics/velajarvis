@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import { createJarvisFigure } from "./jarvisFigure";
 import { createThrongSwarm, type ThrongVisual } from "./throngSwarm";
 import type { RGB, StageState, Visual } from "./types";
+import { companionCount } from "@/lib/population";
 
 export type { StageState } from "./types";
 
@@ -28,7 +29,7 @@ type Ripple = { at: number; strength: number };
 
 /**
  * The animated centrepiece. One canvas, two visuals:
- * - jarvis: a single holographic presence (head & shoulders)
+ * - jarvis: a single holographic presence (head & shoulders) with orbiting Thronglet companions
  * - throng: a multiplying swarm of Thronglets
  * Shared effects: breathing halo, listening ripples, speaking pulse, state-change flash.
  */
@@ -48,6 +49,7 @@ export default function Stage({
   const stateRef = useRef(state);
   const variantRef = useRef(variant);
   const swarmRef = useRef<ThrongVisual | null>(null);
+  const companionsRef = useRef<ThrongVisual | null>(null);
   const popRef = useRef(population);
 
   useEffect(() => {
@@ -59,6 +61,7 @@ export default function Stage({
   useEffect(() => {
     popRef.current = population;
     swarmRef.current?.setPopulation(population);
+    companionsRef.current?.setPopulation(companionCount(population));
   }, [population]);
 
   useEffect(() => {
@@ -88,7 +91,17 @@ export default function Stage({
 
     const swarm = createThrongSwarm(popRef.current);
     swarmRef.current = swarm;
-    const visuals: Record<"jarvis" | "throng", Visual> = { jarvis: createJarvisFigure(), throng: swarm };
+    // JARVIS: one central figure, with a few Thronglet companions orbiting him
+    const figure = createJarvisFigure();
+    const companions = createThrongSwarm(companionCount(popRef.current), { layout: "orbit" });
+    companionsRef.current = companions;
+    const jarvis: Visual = {
+      draw(f) {
+        figure.draw(f);
+        companions.draw(f);
+      },
+    };
+    const visuals: Record<"jarvis" | "throng", Visual> = { jarvis, throng: swarm };
 
     const color = [...PALETTE[variantRef.current].idle] as RGB;
     const rgba = (a: number, boost = 0) =>
@@ -190,6 +203,7 @@ export default function Stage({
       ro.disconnect();
       motionQuery.removeEventListener("change", onMotion);
       swarmRef.current = null;
+      companionsRef.current = null;
     };
   }, [levelRef]);
 

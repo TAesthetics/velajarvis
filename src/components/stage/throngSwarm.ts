@@ -65,9 +65,23 @@ function makeCreature(now: number, parent?: Creature): Creature {
 
 export type ThrongVisual = Visual & { setPopulation(n: number): void };
 
-export function createThrongSwarm(initial: number): ThrongVisual {
+export type SwarmOptions = {
+  /**
+   * "swarm": the THRONG nest (creatures fill the centre).
+   * "orbit": a few companions circling a central figure on a tilted ring (JARVIS mode).
+   */
+  layout?: "swarm" | "orbit";
+};
+
+export function createThrongSwarm(initial: number, opts: SwarmOptions = {}): ThrongVisual {
+  const orbit = opts.layout === "orbit";
   let target = initial;
   let lastBirth = 0;
+  const spawn = (now: number, parent?: Creature) => {
+    const c = makeCreature(now, parent);
+    if (orbit && !parent) c.r = 1.2 + Math.random() * 0.55; // ring radius in units of R
+    return c;
+  };
   const creatures: Creature[] = [];
   const bursts: Burst[] = [];
   let sprite: HTMLCanvasElement | null = null;
@@ -97,11 +111,12 @@ export function createThrongSwarm(initial: number): ThrongVisual {
       const { ctx, cx, cy, R, t, dt, now, state, energy, rgba, reduced } = f;
 
       // initial fill without birth animation, later growth = visible births
-      if (creatures.length === 0) for (let i = 0; i < target; i++) creatures.push(makeCreature(now));
+      if (creatures.length === 0) for (let i = 0; i < target; i++) creatures.push(spawn(now));
       if (creatures.length < target && now - lastBirth > BIRTH_STAGGER_MS) {
         const adults = creatures.filter((c) => now - c.bornAt > BIRTH_MS);
         const parent = adults[Math.floor(Math.random() * adults.length)] ?? creatures[0];
-        const child = makeCreature(now, parent);
+        const child = spawn(now, parent);
+        if (orbit) child.r = Math.max(1.15, Math.min(1.8, child.r));
         creatures.push(child);
         bursts.push({ x: parent.x, y: parent.y, at: now });
         lastBirth = now;
@@ -109,14 +124,20 @@ export function createThrongSwarm(initial: number): ThrongVisual {
       if (creatures.length > target) creatures.splice(target);
 
       const n = creatures.length;
-      const crowd = Math.max(0.55, Math.min(1.15, Math.sqrt(48 / Math.max(1, n))));
-      const spread = 1 + Math.min(0.35, n / 400);
+      const crowd = orbit ? 0.82 : Math.max(0.55, Math.min(1.15, Math.sqrt(48 / Math.max(1, n))));
+      const spread = orbit ? 1 : 1 + Math.min(0.35, n / 400);
       const swirl = state === "thinking" ? 3.2 : state === "listening" ? 0.6 : state === "speaking" ? 1.2 : 0.45;
-      const gather = state === "listening" ? 0.82 : state === "thinking" ? 0.95 : 1;
+      // listening: companions gather closer around the figure
+      const gather = state === "listening" ? (orbit ? 0.78 : 0.82) : state === "thinking" ? 0.95 : 1;
+      // orbit ring centre & tilt (around Jarvis' head)
+      const ocx = cx;
+      const ocy = orbit ? cy - R * 0.3 : cy;
+      const squashY = orbit ? 0.42 : 0.86;
       const breathe = 1 + Math.sin(t * 1.2) * 0.025;
       const unit = R / 120;
 
-      // nest glow
+      // nest glow (swarm only)
+      if (!orbit) {
       const nestR = R * (1 + energy * 0.4) * spread;
       const nest = ctx.createRadialGradient(cx, cy, 0, cx, cy, nestR);
       nest.addColorStop(0, rgba(0.32 + energy * 0.3, 40));
@@ -125,14 +146,15 @@ export function createThrongSwarm(initial: number): ThrongVisual {
       ctx.beginPath();
       ctx.arc(cx, cy, nestR, 0, Math.PI * 2);
       ctx.fill();
+      }
 
       for (const c of creatures) {
         c.a += dt * c.speed * swirl;
         const wob = Math.sin(t * 1.7 + c.phase) * 0.08 + Math.sin(t * 0.6 + c.phase * 2) * 0.05;
         const bounce = state === "speaking" ? energy * 0.25 * Math.abs(Math.sin(t * 7 + c.phase)) : energy * 0.1;
         const rr = R * spread * gather * breathe * (c.r + wob + bounce);
-        const tx = cx + Math.cos(c.a) * rr;
-        const ty = cy + Math.sin(c.a) * rr * 0.86;
+        const tx = ocx + Math.cos(c.a) * rr;
+        const ty = ocy + Math.sin(c.a) * rr * squashY + (orbit ? Math.sin(t * 1.3 + c.phase) * R * 0.05 : 0); // float
         if (c.x === 0 && c.y === 0) {
           c.x = tx;
           c.y = ty;
@@ -142,11 +164,11 @@ export function createThrongSwarm(initial: number): ThrongVisual {
         c.y += (ty - c.y) * Math.min(1, dt * follow);
       }
 
-      // hive links (squared distance, cheap enough for the cap)
+      // hive links (squared distance, cheap enough for the cap); companions skip them
       ctx.lineWidth = 0.7;
       const linkD = R * 0.36;
       const linkD2 = linkD * linkD;
-      for (let i = 0; i < n; i++) {
+      for (let i = 0; i < (orbit ? 0 : n); i++) {
         const a = creatures[i];
         for (let j = i + 1; j < n; j++) {
           const b = creatures[j];
@@ -190,6 +212,7 @@ export function createThrongSwarm(initial: number): ThrongVisual {
 
       // creatures
       const spr = glowSprite(f);
+      const baseAlpha = ctx.globalAlpha;
       for (const c of creatures) {
         const age = c.bornAt ? (now - c.bornAt) / BIRTH_MS : 1;
         const grow = age >= 1 ? 1 : reduced ? age : Math.max(0, easeOutBack(age));
@@ -198,6 +221,9 @@ export function createThrongSwarm(initial: number): ThrongVisual {
         const sk = (now - c.splitAt) / BIRTH_MS;
         const split = c.splitAt && sk < 1 && !reduced ? Math.sin(sk * Math.PI) * 0.45 : 0; // parent stretches while dividing
         const squish = 1 + Math.sin(t * 4 + c.phase) * 0.06;
+        // orbit: creatures on the far side of the ring are dimmer (depth cue)
+        const depth = orbit ? 0.55 + 0.45 * Math.max(0, Math.sin(c.a)) : 1;
+        ctx.globalAlpha = depth * baseAlpha;
 
         ctx.globalCompositeOperation = "lighter";
         ctx.drawImage(spr, c.x - s * 2.8, c.y - s * 2.8, s * 5.6, s * 5.6);
@@ -221,6 +247,7 @@ export function createThrongSwarm(initial: number): ThrongVisual {
           ctx.fill();
         }
       }
+      ctx.globalAlpha = baseAlpha;
       ctx.globalCompositeOperation = "lighter";
     },
   };

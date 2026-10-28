@@ -45,3 +45,7 @@ test("throng knows its population size", () => {
   assert.doesNotMatch(personaPrompt("throng", "de-DE", "jetzt"), /Ihr seid gerade/);
   assert.doesNotMatch(personaPrompt("jarvis", "de-DE", "jetzt", { population: 23 }), /Thronglets\. Ihr vermehrt/);
 });
+
+test("jarvis knows his Thronglet companions", () => {
+  assert.match(personaPrompt("jarvis", "de-DE", "jetzt"), /Begleiter: Um dich kreisen ein paar kleine leuchtende Thronglets/);
+});

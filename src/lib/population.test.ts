@@ -11,6 +11,7 @@ import {
   initialPopulation,
   parsePopulation,
   timeGrowth,
+  companionCount,
 } from "./population";
 
 test("starts small", () => {
@@ -51,4 +52,11 @@ test("parses persisted state defensively", () => {
   assert.equal(parsePopulation(JSON.stringify({ count: 99999, born: 3, lastGrowth: 1 }), 5).count, POP_CAP);
   assert.equal(parsePopulation(JSON.stringify({ count: 40, born: 28, lastGrowth: 99 }), 5).lastGrowth, 5);
   assert.deepEqual(parsePopulation(JSON.stringify({ count: 40, born: 28, lastGrowth: 2 }), 5), { count: 40, born: 28, lastGrowth: 2 });
+});
+
+test("jarvis companions follow the swarm, capped lower", () => {
+  assert.equal(companionCount(POP_MIN), 12);
+  assert.equal(companionCount(30), 18);
+  assert.equal(companionCount(POP_CAP), 24);
+  assert.ok(companionCount(POP_CAP) < POP_CAP);
 });

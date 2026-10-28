@@ -78,3 +78,10 @@ export function parsePopulation(raw: string | null, now: number): Population {
     return initialPopulation(now);
   }
 }
+
+/** JARVIS-mode companions: a small entourage that grows with the swarm, capped lower. */
+export const COMPANION_MIN = 12;
+export const COMPANION_MAX = 24;
+export function companionCount(population: number): number {
+  return Math.max(COMPANION_MIN, Math.min(COMPANION_MAX, Math.round(8 + population / 3)));
+}
