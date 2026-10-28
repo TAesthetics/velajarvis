@@ -11,7 +11,7 @@ import { VELA_KNOWLEDGE } from "@/lib/vela-knowledge";
 
 export const maxDuration = 30;
 
-const MODEL = process.env.JARVIS_MODEL || "spacexai/grok-4.20-non-reasoning";
+const MODEL = process.env.JARVIS_MODEL || "openai/gpt-4.1-mini";
 
 type Lang = "de-DE" | "en-US";
 type Mode = "throng" | "jarvis";
